@@ -13,23 +13,32 @@ from utils.response_parser import parse_target_conditions
 
 def process_user_turn(chat_history, current_conditions, user_text, profile_df):
     """
-    한 턴의 대화를 처리한다: AI 호출 -> 응답에서 조건 JSON 분리 -> 이전 조건과 병합.
-    Streamlit 세션 상태에 직접 의존하지 않아 단위 테스트가 가능하다.
+    한 턴의 대화를 처리한다: AI 호출 -> 응답에서 조건 JSON 분리 -> 새로운 조건으로 덮어쓰기.
     """
     history_with_user = chat_history + [{"role": "user", "text": user_text}]
     profile_context_str = summarize_profile_context(profile_df)
     current_conditions_str = json.dumps(current_conditions or {}, ensure_ascii=False)
 
+    # AI 호출
     ai_raw = generate_target_chat_reply(history_with_user, profile_context_str, current_conditions_str)
     reply_text, parsed_conditions = parse_target_conditions(ai_raw)
 
-    merged_conditions = dict(current_conditions or {})
+    # 🌟 [마법의 롤백 해결책] 
+    # AI가 '전체 조건 상태'를 다시 빚어주므로, 빈 값(삭제된 조건)을 제외하고 완전히 새로 덮어씁니다.
+    new_conditions = {}
     for k, v in (parsed_conditions or {}).items():
-        if v not in (None, [], ""):
-            merged_conditions[k] = v
+        # "질문조건"이나 "확인필요단어"는 확정 타겟이 아니므로 제외합니다.
+        if k in ["질문조건", "확인필요단어"]:
+            continue
+            
+        # 값이 비어있지 않은(유지되거나 추가된) 실제 조건들만 새 조건표에 담습니다.
+        # AI가 빈 값으로 보낸(삭제한) 조건은 이 과정에서 자연스럽게 증발(롤백)합니다!
+        if v not in (None, [], "", {}):
+            new_conditions[k] = v
 
     new_history = history_with_user + [{"role": "ai", "text": reply_text}]
-    return new_history, merged_conditions
+    
+    return new_history, new_conditions
 
 
 def render_target_chat_panel(profile_df):
