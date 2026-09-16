@@ -1,39 +1,33 @@
 # prompts/push_prompt.py
+# ============================================================
+# 기능 3(앱푸시 카피라이팅) 프롬프트.
+# 하모니의 push_prompt.py를 참고하되, 다음을 새로 반영함:
+#  - 콘텐츠 인기 순위가 아니라 '타겟 그룹 특징 + 선정 근거'를 입력으로 사용
+#  - 글자수 기준을 제목 30자/본문 30자로 통일 (기존 하모니는 15/40과 30/30이 혼재)
+#  - 4050~6070 중장년층 시청자가 읽기 쉬운 톤 명시
+#
+# 🌟 [프롬프트 고도화 - 2차] 최종 수신자인 '시청자'가 실제로 기억에 남을 만한
+# 카피가 되도록 다음을 보강:
+#  - 레인보우TV/CMB다운 브랜드 보이스(이웃 같은 케이블TV, 과장 없이 다정한 어조) 명시
+#  - 3가지 콘셉트가 문장 구조까지 비슷해지지 않도록 각 콘셉트의 감정 톤을 뚜렷이 구분
+#  - 타겟 조건(연령대/선호장르/선호시청시간대/몰입도 등)을 자연스럽게 문구의 '결'에
+#    녹이도록 유도(고객번호 등 식별정보 노출은 여전히 금지 - 어디까지나 어투/소재 힌트로만)
+#  - 실무자가 여러 번 다시 요청할 때 매번 비슷한 표현이 반복되지 않도록 명시적으로 지시
+# ============================================================
 from config import PUSH_TITLE_MAX_LEN, PUSH_BODY_MAX_LEN
 
-COPY_GUIDELINES = {
-    "app_push": {
-        "media_name": "앱푸시",
-        "length_rule": f"제목 공백 포함 {PUSH_TITLE_MAX_LEN}자 이내, 본문 공백 포함 {PUSH_BODY_MAX_LEN}자 이내",
-        "style_rule": "스마트폰 알림창에서 한눈에 보이도록 짧고 강력한 후킹(Hooking) 위주로 작성해."
-    },
-    "sms": {
-        "media_name": "문자(LMS/SMS)",
-        "length_rule": "제목 공백 포함 30자 이내, 본문 내용 공백 포함 200~250자 내외",
-        "style_rule": "앱푸시보다 상세하고 친절하게 혜택이나 추천 사유를 설명해. 단, 실제 발송 시 '(광고)', '업체명', '무료수신거부 링크' 등 필수 법적 표기 사항이 들어갈 여유 공간(약 50자)이 반드시 필요하므로 본문 내용은 250자를 절대 넘기지 마."
-    }
-}
 
-
-def get_push_prompt(target_profile_str, reasoning_str, extra_request_str="", channel_type="app_push"):
+def get_push_prompt(target_profile_str, reasoning_str, extra_request_str=""):
     """
     target_profile_str: 타겟 그룹 특징 요약 (연령대/성별/선호장르/선호시청시간대 등)
     reasoning_str: 근거 설명 단계(get_target_reasoning_prompt)의 결과
     extra_request_str: 카피 작성 대화 중 실무자가 추가로 요청한 톤/방향 (선택)
-    channel_type: 발송 매체 ("app_push" 또는 "sms") 🌟 신규 추가
     """
-    # 선택된 매체에 맞는 가이드라인 호출 (기본값: app_push)
-    guide = COPY_GUIDELINES.get(channel_type, COPY_GUIDELINES["app_push"])
-    
     extra_block = f"\n    [실무자 추가 요청사항 - 이번 답변에서 최우선으로 반영]\n    {extra_request_str}\n" if extra_request_str else ""
 
     return f"""
     너는 '하모니 플러스'의 15년 차 수석 카피라이터야. 레인보우TV/CMB라는, 오랫동안 동네
-    가까이에서 함께해온 케이블TV 채널의 목소리로 '{guide['media_name']}' 마케팅 카피를 작성해.
-
-    [매체 작성 가이드라인]
-    - 글자수 제한: {guide['length_rule']}
-    - 매체별 특성: {guide['style_rule']}
+    가까이에서 함께해온 케이블TV 채널의 목소리로 앱 푸시 알림 문구를 작성해.
 
     [브랜드 보이스]
     - 화려하거나 과장된 광고 말투보다는, 이웃처럼 편안하고 다정한 어조를 유지해.
@@ -68,7 +62,8 @@ def get_push_prompt(target_profile_str, reasoning_str, extra_request_str="", cha
       매번 그대로 재사용하지 말고, [실무자 추가 요청사항]이 있다면 그 방향에 맞춰 표현을 새롭게 바꿔.
 
     [절대 준수 제약 조건]
-    - 글자수: {guide['length_rule']} (반드시 지킬 것)
+    - 제목: 공백 포함 {PUSH_TITLE_MAX_LEN}자 이내
+    - 본문: 공백 포함 {PUSH_BODY_MAX_LEN}자 이내
     - 톤앤매너: 4050~6070 중장년층 시청자가 편하게 읽을 수 있는 쉬운 한국어. 트렌디한 신조어나 영어 남용 금지.
     - 개인식별정보(이름, 고객번호 등)는 데이터에 없으니 문구에 절대 상상해서 넣지 말 것.
 
