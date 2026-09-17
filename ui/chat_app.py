@@ -412,11 +412,11 @@ def render_chat_app(profile_df, db_audience=None):
 
     last_idx = len(st.session_state.messages) - 1
     for i, turn in enumerate(st.session_state.messages):
-        should_animate = (
-            i == last_idx and turn["role"] == "assistant"
-            and st.session_state.get('stream_next') and anchor_idx is None
-        )
-        _render_message(turn["role"], turn["text"], animate=should_animate)
+        should_animate = (i == last_idx and turn["role"] == "assistant" and st.session_state.get('stream_next'))
+        if should_animate and anchor_idx is not None:
+            _render_message(turn["role"], turn["text"], animate=True, delay=0.008, chunk_size=14)
+        else:
+            _render_message(turn["role"], turn["text"], animate=should_animate)
         if should_animate:
             st.session_state.stream_next = False
         if i == anchor_idx:
