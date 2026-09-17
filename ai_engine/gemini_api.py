@@ -1,20 +1,11 @@
 # ai_engine/gemini_api.py
-# ============================================================
-# 하모니의 _call_gemini_api() 코어 함수(재시도/타임아웃/모델 동적탐색 방어 로직)를
-# 그대로 재사용한다. 대화형 기능(타겟 챗)은 Gemini 쪽에 세션을 유지하지 않고,
-# 매 턴마다 대화 이력 전체를 프롬프트 문자열에 포함시켜 호출하는 방식으로 구현한다
-# (단발성 API 구조를 바꾸지 않고 "대화처럼 보이게" 감싸는 접근).
-# ============================================================
 import requests
 import time
 import streamlit as st
 from config import GEMINI_API_KEY
 from prompts.target_chat_prompt import get_target_chat_prompt, get_target_reasoning_prompt, get_segment_insight_prompt
-from prompts.push_prompt import get_push_prompt
+from prompts.push_prompt import get_push_prompt, get_sms_prompt
 
-# 🌟 [속도 최적화] 매 호출마다 requests.get/post를 새로 열면 구글 서버와의 TCP/TLS
-# 연결도 매번 새로 맺어야 한다. 프로세스 전역에서 세션 하나를 재사용해 연결을
-# 유지(keep-alive)하면 대화 한 턴 한 턴의 네트워크 왕복 시간이 줄어든다.
 _http_session = requests.Session()
 
 # 🌟 [404 대응] 모델 목록 조회 자체가 실패했을 때의 최종 폴백값
@@ -184,8 +175,13 @@ def generate_target_reasoning(conditions_str, target_stats_str):
     prompt = get_target_reasoning_prompt(conditions_str, target_stats_str)
     return _call_gemini_api(prompt, temperature=0.4)
 
-def generate_ai_push_copy(target_profile_str, reasoning_str, extra_request_str=""):
-    prompt = get_push_prompt(target_profile_str, reasoning_str, extra_request_str)
+def generate_ai_push_copy(target_profile_str, reasoning_str, extra_request_str="", copy_type='push'):
+    """copy_type: 'push'(앱푸시) 또는 'sms'(문자) - 타입에 따라 다른 프롬프트(글자수/광고표기 등
+    제약이 다름)를 사용한다."""
+    if copy_type == 'sms':
+        prompt = get_sms_prompt(target_profile_str, reasoning_str, extra_request_str)
+    else:
+        prompt = get_push_prompt(target_profile_str, reasoning_str, extra_request_str)
     return _call_gemini_api(prompt, temperature=0.7)
 
 def get_current_model_label():

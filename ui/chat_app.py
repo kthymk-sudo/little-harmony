@@ -264,14 +264,6 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
         elif v not in (None, [], ""):
             merged_conditions[k] = v
 
-    # 🌟 [탐색형 대화 고도화] 질문으로 판단된 턴이면, AI가 답을 지어내는 대신 시스템이
-    # 실제 데이터를 계산(summarize_segment_insight)한 뒤 그 결과만 근거로 답변을 다시
-    # 만든다. 확정 조건(merged_conditions)에는 전혀 반영하지 않으므로, 실무자가 "그
-    # 조건으로 타겟 잡아줘"라고 명시적으로 말해야만 다음 턴에 실제 타겟 조건으로 넘어간다.
-    # 🌟 [오류/속도 고도화] 이 답변은 계산된 숫자를 문장으로 옮기기만 하면 되므로,
-    # 여기서 추가로 제미나이를 한 번 더 호출하지 않고 format_segment_insight_reply()로
-    # 즉시 문장을 만든다 - 대화 한 턴당 API 호출이 1회 줄어 429(요청 한도 초과) 위험과
-    # 응답 지연이 함께 줄어든다.
     if isinstance(question_conditions, dict) and question_conditions:
         insight = summarize_segment_insight(profile_df, question_conditions, db_audience)
         reply_text = format_segment_insight_reply(insight)
@@ -279,15 +271,18 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
     new_messages = history_with_user + [{"role": "assistant", "text": reply_text}]
     return new_messages, merged_conditions
 
+_COPY_TYPE_LABELS = {'push': '📱 앱푸시 카피', 'sms': '✉️ SMS 문자 카피'}
 
-def process_copy_turn(messages, target_summary_str, reasoning, user_text):
-    """카피 작성 대화 한 턴 처리 (Streamlit 비의존 - 단위 테스트 가능)."""
-    raw = generate_ai_push_copy(target_summary_str, reasoning, user_text or "")
+def process_copy_turn(messages, target_summary_str, reasoning, user_text, copy_type='push'):
+    """카피 작성 대화 한 턴 처리 (Streamlit 비의존 - 단위 테스트 가능).
+    copy_type: 'push'(앱푸시) 또는 'sms'(문자) - 어떤 형식/글자수 제약으로 만들지 결정."""
+    raw = generate_ai_push_copy(target_summary_str, reasoning, user_text or "", copy_type=copy_type)
     copy_text = format_push_copy_for_display(raw)
+    label = _COPY_TYPE_LABELS.get(copy_type, _COPY_TYPE_LABELS['push'])
+    labeled_text = f"**[{label}]**\n\n{copy_text}"
     new_messages = messages + ([{"role": "user", "text": user_text}] if user_text else [])
-    new_messages = new_messages + [{"role": "assistant", "text": copy_text}]
+    new_messages = new_messages + [{"role": "assistant", "text": labeled_text}]
     return new_messages, copy_text
-
 
 def _autosave():
     member_ids = (
@@ -344,12 +339,26 @@ def _render_target_card():
                 width='stretch',
             )
 
-        if st.session_state.phase == 'targeting':
-            if st.button("📝 이 타겟으로 카피 작성 시작"):
-                st.session_state.pending_copy_start = True
+        col_push, col_sms = st.columns(2)
+        with col_push:
+            if st.button(
+                "📱 앱푸시 카피 작성",
+                disabled=st.session_state.get('push_copy_generated', False),
+                width='stretch',
+            ):
+                st.session_state.pending_copy_start = 'push'
                 st.rerun()
-        else:
-            st.caption("아래 채팅창에 원하는 방향을 입력하면 카피를 다시 다듬어드립니다. (예: 더 친근하게, 이벤트 느낌으로)")
+        with col_sms:
+            if st.button(
+                "✉️ SMS 문자 작성",
+                disabled=st.session_state.get('sms_copy_generated', False),
+                width='stretch',
+            ):
+                st.session_state.pending_copy_start = 'sms'
+                st.rerun()
+
+        if st.session_state.phase == 'copywriting':
+            st.caption("아래 채팅창에 원하는 방향을 입력하면 방금 만든 카피를 다시 다듬어드립니다. (예: 더 친근하게, 이벤트 느낌으로)")
 
 def _render_confirm_bar(profile_df, db_audience):
     """'이 조건으로 타겟 확정하기' 안내문 + 버튼을 그린다.
@@ -369,6 +378,10 @@ def _render_confirm_bar(profile_df, db_audience):
         st.session_state.target_result_stats = stats
         st.session_state.target_summary_str = summary_str
         st.session_state.target_reasoning = reasoning
+        # 🌟 [카피 타입 분리] 새로 타겟을 확정할 때마다 앱푸시/SMS 버튼을 다시 눌러
+        # 만들 수 있도록 두 생성 여부 플래그를 초기화한다.
+        st.session_state.push_copy_generated = False
+        st.session_state.sms_copy_generated = False
         st.session_state.messages.append({
             "role": "assistant",
             "text": f"총 {stats.get('대상자수', 0)}명이 이 조건에 해당합니다.\n\n{reasoning}",
@@ -376,7 +389,6 @@ def _render_confirm_bar(profile_df, db_audience):
         st.session_state.stream_next = True
         _autosave()
         st.rerun()
-
 
 def render_chat_app(profile_df, db_audience=None):
     _inject_chat_css()
@@ -422,19 +434,26 @@ def render_chat_app(profile_df, db_audience=None):
             _render_target_card()
 
     if st.session_state.get('pending_copy_start'):
+        copy_type = st.session_state.pending_copy_start
         st.session_state.pending_copy_start = False
-        with st.spinner("카피 초안을 작성하는 중..."):
+        spinner_text = "앱푸시 카피 초안을 작성하는 중..." if copy_type == 'push' else "SMS 문자 초안을 작성하는 중..."
+        with st.spinner(spinner_text):
             new_messages, copy_text = process_copy_turn(
                 st.session_state.messages, st.session_state.target_summary_str,
-                st.session_state.target_reasoning, "",
+                st.session_state.target_reasoning, "", copy_type=copy_type,
             )
         st.session_state.messages = new_messages
         st.session_state.push_copy_result = copy_text
+        st.session_state.last_copy_type = copy_type
+        if copy_type == 'push':
+            st.session_state.push_copy_generated = True
+        else:
+            st.session_state.sms_copy_generated = True
         st.session_state.phase = 'copywriting'
         st.session_state.stream_next = True
         _autosave()
         st.rerun()
-
+        
     if st.session_state.get('pending_user_text'):
         pending = st.session_state.pop('pending_user_text')        
         with st.spinner("생각하는 중..."):
@@ -442,6 +461,7 @@ def render_chat_app(profile_df, db_audience=None):
                 new_messages, copy_text = process_copy_turn(
                     st.session_state.messages[:-1], st.session_state.target_summary_str,
                     st.session_state.target_reasoning, pending,
+                    copy_type=st.session_state.get('last_copy_type', 'push'),
                 )
                 st.session_state.messages = new_messages
                 st.session_state.push_copy_result = copy_text
