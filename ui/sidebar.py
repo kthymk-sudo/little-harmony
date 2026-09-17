@@ -1,16 +1,9 @@
 # ui/sidebar.py
-# ============================================================
-# 🌟 [신규] ChatGPT/Gemini 스타일 사이드바.
-# 상단에 '+ 새 대화' 버튼, 그 아래 저장된 대화(=타겟 작업) 목록,
-# 시청기간 설정, 맨 아래 접힌 상태의 데이터 업로드 섹션으로 구성.
-# 대화 목록의 각 항목은 하나의 '타겟 설정 스레드'이며 클릭하면 그
-# 대화 전체(메시지, 조건, 확정 결과, 카피)가 복원된다.
-# ============================================================
 import datetime
 import streamlit as st
 from config import start_new_conversation, load_conversation_into_session
 from database.db_manager import list_conversations, load_conversation, delete_conversation, rename_conversation
-from ai_engine.gemini_api import get_current_model_label
+from database.db_manager import get_loaded_periods
 from ui.upload_panel import render_upload_panel
 
 
@@ -104,12 +97,15 @@ def render_sidebar():
 
         with st.expander("⚙️ 시스템 정보"):
             try:
-                model_label = get_current_model_label()
+                periods = get_loaded_periods()
             except Exception:
-                model_label = "확인 불가"
-            st.caption(f"현재 사용 중인 AI 모델: `{model_label}`")
-            st.caption(
-                "429(요청 한도 초과) 오류가 자주 뜬다면, 위 모델 이름으로 "
-                "[Google AI Studio 사용량 페이지](https://aistudio.google.com/rate-limit)에서 "
-                "정확한 한도와 현재 사용량을 확인해보세요."
-            )
+                periods = []
+
+            if not periods:
+                st.caption("적재된 시청내역 DB가 없습니다.")
+            else:
+                first_month = periods[0]['month']
+                last_month = periods[-1]['month']
+                st.caption(f"적재된 시청내역 기간: **{first_month} ~ {last_month}** ({len(periods)}개월)")
+                for p in periods:
+                    st.caption(f"　·  {p['month']}  —  {p['rows']:,}건")

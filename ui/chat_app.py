@@ -1,24 +1,4 @@
 # ui/chat_app.py
-# ============================================================
-# 기존에 탭 4개(1.타겟 대화/2.타겟 확인/3.카피 작성/4.이력)로 나뉘어 있던
-# 화면을 하나의 연속된 대화 스레드로 통합.
-#
-# 구조:
-#  - 대화 메시지 목록 (실무자 메시지는 오른쪽, AI 메시지는 왼쪽 말풍선)
-#  - 상태에 따라 나타나는 "컨텍스트 액션 바" (조건 확정 버튼 / 확정 결과 카드 /
-#    카피 시작 버튼 / CRM 리스트) - 과거 메시지 안에 버튼을 넣지 않고
-#    항상 최신 상태 기준으로 하나만 표시해 자연스러운 챗 UX를 유지한다.
-#  - 맨 아래 채팅 입력창 하나 (phase에 따라 targeting/copywriting 중
-#    무엇을 할지 자동으로 분기)
-#
-# 🌟 [변경] st.chat_message는 좌우 정렬을 지원하지 않아(둘 다 왼쪽 고정),
-# 카카오톡/챗지피티 모바일 앱처럼 "내 메시지는 오른쪽, AI는 왼쪽"으로 보이도록
-# 말풍선 자체를 CSS로 직접 그리는 방식으로 교체했다. 타이핑 효과도 이
-# 말풍선 안에서 그대로 재생되도록 함께 구현.
-#
-# 대화 상태는 turn마다 자동으로 tb_conversation에 저장되어, 사이드바에서
-# 바로 이어서 작업할 수 있다 (ChatGPT의 대화 자동 저장과 동일한 개념).
-# ============================================================
 import io
 import json
 import time
@@ -327,6 +307,76 @@ def _autosave():
         push_copy=st.session_state.push_copy_result,
     )
 
+def _render_target_card():
+    """확정된 타겟 결과 카드(대상자 수 / 엑셀 다운로드 / 카피 작성 버튼)를 그린다.
+    🌟 [UX 고도화] 이 카드를 메시지 목록 뒤에 고정으로 그리지 않고, 타겟이 확정된
+    바로 그 메시지 자리에 끼워 넣어(render_chat_app 참고), 이후 이어지는 카피 대화가
+    이 카드 "아래로" 자연스럽게 쌓이도록 한다."""
+    if st.session_state.target_result_df is None:
+        return
+    with st.container(border=True):
+        stats = st.session_state.target_result_stats or {}
+        m1, m2 = st.columns(2)
+        m1.metric("확정된 대상자 수", f"{stats.get('대상자수', 0):,}명")
+        total_n = stats.get('전체시청자수', 0)
+        share = f"{stats.get('대상자수', 0) / total_n * 100:.1f}%" if total_n else "-"
+        m2.metric("전체 시청자 대비 비중", share)
+        if stats.get('전체평균시청유지율'):
+            st.caption(
+                f"📊 이 타겟의 평균 시청유지율 {stats.get('평균시청유지율', 0)}% "
+                f"(전체 평균 {stats.get('전체평균시청유지율', 0)}%) · "
+                f"평균 총시청시간 {stats.get('평균총시청시간(분)', 0)}분 "
+                f"(전체 평균 {stats.get('전체평균총시청시간(분)', 0)}분)"
+            )
+        show_cols = [c for c in ['R고객번호', '성별', '나이', '시청자SO', '선호장르', '선호시청시간대',
+                                  '시청콘텐츠수', '평균시청유지율']
+                     if c in st.session_state.target_result_df.columns]
+        with st.expander("대상자 상세 보기"):
+            st.dataframe(st.session_state.target_result_df[show_cols], width='stretch')
+
+        with st.container(border=True):
+            st.caption("R고객번호 엑셀 다운로드")
+            st.download_button(
+                "📥 R고객번호 엑셀 다운로드 (캠페인 업로드 양식)",
+                data=_build_customer_id_excel(st.session_state.target_result_df),
+                file_name="레인보우TV_이웃고객관리목록.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                width='stretch',
+            )
+
+        if st.session_state.phase == 'targeting':
+            if st.button("📝 이 타겟으로 카피 작성 시작"):
+                st.session_state.pending_copy_start = True
+                st.rerun()
+        else:
+            st.caption("아래 채팅창에 원하는 방향을 입력하면 카피를 다시 다듬어드립니다. (예: 더 친근하게, 이벤트 느낌으로)")
+
+def _render_confirm_bar(profile_df, db_audience):
+    """'이 조건으로 타겟 확정하기' 안내문 + 버튼을 그린다.
+    🌟 [UX 고도화] 이 액션 바를 항상 화면 맨 아래(카드보다도 아래)에 고정으로 그리면,
+    한 번 타겟을 확정한 뒤에는 버튼이 카드 밑에 다시 나타나 어색해 보인다. 그래서
+    이미 확정된 타겟(카드)이 있을 때는 이 함수를 카드 "바로 위"(anchor 위치)에서
+    호출하고, 아직 한 번도 확정한 적 없을 때만 메시지 목록 맨 끝에서 호출한다
+    (render_chat_app 참고). 조건을 더 이야기해서 바꾼 뒤 다시 눌러 재확정하는 것도
+    이 함수 하나로 그대로 지원된다."""
+    st.info(f"🔖 현재까지 파악된 조건: {format_conditions_line(st.session_state.target_conditions)}")
+    if st.button("✅ 이 조건으로 타겟 확정하기", type="primary"):
+        with st.spinner("타겟을 계산하고 근거를 정리하는 중..."):
+            target_df, stats = apply_target_conditions(profile_df, st.session_state.target_conditions, db_audience)
+            summary_str = format_target_summary(st.session_state.target_conditions, stats)
+            reasoning = generate_target_reasoning(str(st.session_state.target_conditions), str(stats))
+        st.session_state.target_result_df = target_df
+        st.session_state.target_result_stats = stats
+        st.session_state.target_summary_str = summary_str
+        st.session_state.target_reasoning = reasoning
+        st.session_state.messages.append({
+            "role": "assistant",
+            "text": f"총 {stats.get('대상자수', 0)}명이 이 조건에 해당합니다.\n\n{reasoning}",
+        })
+        st.session_state.stream_next = True
+        _autosave()
+        st.rerun()
+
 
 def render_chat_app(profile_df, db_audience=None):
     _inject_chat_css()
@@ -355,21 +405,41 @@ def render_chat_app(profile_df, db_audience=None):
         _render_message("assistant", greeting, animate=st.session_state.get('greet_stream_pending', False))
         st.session_state.greet_stream_pending = False
 
+    anchor_idx = None
+    for i, turn in enumerate(st.session_state.messages):
+        if turn["role"] == "assistant" and turn["text"].startswith("총 ") and "이 조건에 해당합니다" in turn["text"]:
+            anchor_idx = i
+
     last_idx = len(st.session_state.messages) - 1
     for i, turn in enumerate(st.session_state.messages):
-        # 방금 막 생성된 마지막 assistant 메시지에만 타이핑 효과를 적용한다.
-        # (사이드바에서 불러온 과거 대화나, 그냥 다시 그려지는 메시지는 즉시 표시)
-        should_animate = (i == last_idx and turn["role"] == "assistant" and st.session_state.get('stream_next'))
+        should_animate = (
+            i == last_idx and turn["role"] == "assistant"
+            and st.session_state.get('stream_next') and anchor_idx is None
+        )
         _render_message(turn["role"], turn["text"], animate=should_animate)
         if should_animate:
             st.session_state.stream_next = False
+        if i == anchor_idx:
+            if st.session_state.target_conditions and st.session_state.phase == 'targeting':
+                _render_confirm_bar(profile_df, db_audience)
+            _render_target_card()
 
-    # ---- 사용자 메시지는 이미 화면에 표시됐으니, 이제 AI 응답을 생성한다 ----
-    # 🌟 [응답 순서 개선] 입력 처리부에서 사용자 메시지만 먼저 추가하고 rerun하면
-    # 위의 렌더링 루프가 사용자 말풍선을 즉시 그려준다. 그 다음 이 rerun에서
-    # pending_user_text가 있으면 그때 비로소 "생각하는 중" 스피너 + AI 호출을 한다.
+    if st.session_state.get('pending_copy_start'):
+        st.session_state.pending_copy_start = False
+        with st.spinner("카피 초안을 작성하는 중..."):
+            new_messages, copy_text = process_copy_turn(
+                st.session_state.messages, st.session_state.target_summary_str,
+                st.session_state.target_reasoning, "",
+            )
+        st.session_state.messages = new_messages
+        st.session_state.push_copy_result = copy_text
+        st.session_state.phase = 'copywriting'
+        st.session_state.stream_next = True
+        _autosave()
+        st.rerun()
+
     if st.session_state.get('pending_user_text'):
-        pending = st.session_state.pop('pending_user_text')
+        pending = st.session_state.pop('pending_user_text')        
         with st.spinner("생각하는 중..."):
             if st.session_state.phase == 'copywriting':
                 new_messages, copy_text = process_copy_turn(
@@ -389,82 +459,14 @@ def render_chat_app(profile_df, db_audience=None):
         _autosave()
         st.rerun()
 
-    # ---- 조건 확정 액션 바 ----
-    if st.session_state.target_conditions and st.session_state.phase == 'targeting':
-        st.info(f"🔖 현재까지 파악된 조건: {format_conditions_line(st.session_state.target_conditions)}")
-        if st.button("✅ 이 조건으로 타겟 확정하기", type="primary"):
-            with st.spinner("타겟을 계산하고 근거를 정리하는 중..."):
-                # 🌟 [타겟팅 고도화] 콘텐츠명포함/채널명포함 조건은 이벤트 단위 원본(db_audience)이
-                # 있어야 영상명/채널명 키워드 매칭이 가능해 함께 넘긴다.
-                target_df, stats = apply_target_conditions(profile_df, st.session_state.target_conditions, db_audience)
-                summary_str = format_target_summary(st.session_state.target_conditions, stats)
-                reasoning = generate_target_reasoning(str(st.session_state.target_conditions), str(stats))
-            st.session_state.target_result_df = target_df
-            st.session_state.target_result_stats = stats
-            st.session_state.target_summary_str = summary_str
-            st.session_state.target_reasoning = reasoning
-            st.session_state.messages.append({
-                "role": "assistant",
-                "text": f"총 {stats.get('대상자수', 0)}명이 이 조건에 해당합니다.\n\n{reasoning}",
-            })
-            st.session_state.stream_next = True
-            _autosave()
-            st.rerun()
+    # ---- 조건 확정 액션 바 (아직 한 번도 타겟을 확정한 적 없는 경우에만 메시지 맨 끝에 표시.
+    #      한 번이라도 확정한 뒤에는 위 메시지 루프에서 카드 바로 위에 표시된다) ----
+    if anchor_idx is None and st.session_state.target_conditions and st.session_state.phase == 'targeting':
+        _render_confirm_bar(profile_df, db_audience)
 
-    # ---- 확정된 타겟 결과 카드 ----
-    if st.session_state.target_result_df is not None:
-        with st.container(border=True):
-            stats = st.session_state.target_result_stats or {}
-            m1, m2 = st.columns(2)
-            m1.metric("확정된 대상자 수", f"{stats.get('대상자수', 0):,}명")
-            total_n = stats.get('전체시청자수', 0)
-            share = f"{stats.get('대상자수', 0) / total_n * 100:.1f}%" if total_n else "-"
-            m2.metric("전체 시청자 대비 비중", share)
-            # 🌟 [실무자 UX 고도화] 몰입도(시청 유지율/총시청시간) 조건을 새로 지원하게 되면서,
-            # 이 타겟이 전체 평균보다 얼마나 몰입도가 높은/낮은 그룹인지 한눈에 보이도록 캡션 추가.
-            if stats.get('전체평균시청유지율'):
-                st.caption(
-                    f"📊 이 타겟의 평균 시청유지율 {stats.get('평균시청유지율', 0)}% "
-                    f"(전체 평균 {stats.get('전체평균시청유지율', 0)}%) · "
-                    f"평균 총시청시간 {stats.get('평균총시청시간(분)', 0)}분 "
-                    f"(전체 평균 {stats.get('전체평균총시청시간(분)', 0)}분)"
-                )
-            show_cols = [c for c in ['R고객번호', '성별', '나이', '시청자SO', '선호장르', '선호시청시간대',
-                                      '시청콘텐츠수', '평균시청유지율']
-                         if c in st.session_state.target_result_df.columns]
-            with st.expander("대상자 상세 보기"):
-                st.dataframe(st.session_state.target_result_df[show_cols], width='stretch')
-
-            # 🌟 [UX 고도화] 엑셀 다운로드 버튼을 "대상자 상세 보기"와 같은 결의 박스 안에
-            # 채워서 보여준다 - 카드 하단에 버튼 하나만 덩그러니 있는 것보다, 위 상세 보기
-            # 박스와 짝을 이루는 카드로 묶여 있는 편이 한눈에 더 잘 들어온다.
-            with st.container(border=True):
-                st.caption("R고객번호 엑셀 다운로드")
-                st.download_button(
-                    "📥 R고객번호 엑셀 다운로드 (캠페인 업로드 양식)",
-                    data=_build_customer_id_excel(st.session_state.target_result_df),
-                    file_name="레인보우TV_이웃고객관리목록.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    width='stretch',
-                )
-
-            if st.session_state.phase == 'targeting':
-                if st.button("📝 이 타겟으로 카피 작성 시작"):
-                    with st.spinner("카피 초안을 작성하는 중..."):
-                        new_messages, copy_text = process_copy_turn(
-                            st.session_state.messages, st.session_state.target_summary_str,
-                            st.session_state.target_reasoning, "",
-                        )
-                    st.session_state.messages = new_messages
-                    st.session_state.push_copy_result = copy_text
-                    st.session_state.phase = 'copywriting'
-                    st.session_state.stream_next = True
-                    _autosave()
-                    st.rerun()
-            else:
-                # 🌟 [UX 정리] "CRM 붙여넣기용 R고객번호 목록"은 위 엑셀 다운로드로 이미
-                # 같은 정보를 제공하고 있어 중복 기능이라 제거했다(요청 반영).
-                st.caption("아래 채팅창에 원하는 방향을 입력하면 카피를 다시 다듬어드립니다. (예: 더 친근하게, 이벤트 느낌으로)")
+    # ---- 확정된 타겟 결과 카드 (위 메시지 루프에서 자리를 못 찾은 경우의 폴백) ----
+    if anchor_idx is None and st.session_state.target_result_df is not None:
+        _render_target_card()
 
     # ---- 채팅 입력 (phase에 따라 자동 분기) ----
     placeholder = (
