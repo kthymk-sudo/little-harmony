@@ -1,3 +1,4 @@
+# ai_engine/gemini_api.py
 import requests
 import time
 import streamlit as st
@@ -13,9 +14,41 @@ _LATEST_FLASH_ALIAS = "models/gemini-flash-latest"
 # 🌟 [429 대응 고도화] 실험/미리보기 계열 등 무료 등급 한도가 낮은 모델 키워드 배제
 _AVOID_MODEL_KEYWORDS = ("exp", "preview", "thinking", "image", "audio", "tts", "embedding", "vision", "native")
 
-# 🌟 [한도 초과 모델 관리] 429(일일 한도 초과) 에러로 더 이상 쓸 수 없는 모델을 기록하여,
-# 다음 탐색 시 우선순위에서 배제하고 다른 모델을 선택하도록 합니다. (초기화 시 빈 상태)
-_EXHAUSTED_MODELS = set()
+# 🌟 [한도 초과 모델 관리 - 시간 기반 만료] 429(일일 한도 초과) 에러로 더 이상 쓸 수 없는
+# 모델을 "모델명 -> 배제된 시각(epoch)"으로 기록한다. 구글의 일일 한도는 자정마다
+# 초기화되는데, 예전에는 이 목록이 프로세스가 재시작되기 전까지 영원히 비워지지 않아서,
+# 어제 한도 초과로 배제한 모델이 오늘 한도가 다시 찼는데도 계속 후순위로 밀리는 문제가
+# 있었다. 이제 배제 후 24시간이 지나면 자동으로 다시 후보에 포함시킨다.
+_EXHAUSTED_MODELS = {}
+_EXHAUSTED_TTL_SECONDS = 24 * 60 * 60
+
+
+def _mark_exhausted(model_name):
+    _EXHAUSTED_MODELS[model_name] = time.time()
+
+
+def _is_still_exhausted(model_name):
+    exhausted_at = _EXHAUSTED_MODELS.get(model_name)
+    if exhausted_at is None:
+        return False
+    if time.time() - exhausted_at >= _EXHAUSTED_TTL_SECONDS:
+        _EXHAUSTED_MODELS.pop(model_name, None)
+        return False
+    return True
+
+
+# 🌟 [에러 오염 방지] _call_gemini_api가 실패 시 반환하는 안내 문구는 항상 이 접두사로
+# 시작한다. 이 문구를 정상 AI 답변과 구분 없이 대화 기록에 남기거나 근거/카피 생성에
+# 재사용하면, 다음 턴 프롬프트에 "AI: ⚠️ ..." 식으로 그대로 섞여 들어가 AI가 오류
+# 문구 자체를 실제 발언으로 착각하거나, 실패한 근거가 카피 생성에 재사용되는 문제가
+# 생긴다. 호출부는 반환값을 화면/후속 로직에 쓰기 전에 반드시 is_api_error()로
+# 먼저 확인해야 한다.
+_ERROR_PREFIX = "⚠️"
+
+
+def is_api_error(text):
+    """_call_gemini_api가 실패 시 반환하는 안내 문구인지 판별한다."""
+    return bool(text) and text.startswith(_ERROR_PREFIX)
 
 
 def _pick_best_flash_model(available_models):
@@ -24,9 +57,9 @@ def _pick_best_flash_model(available_models):
     2순위. 실험/미리보기 등 무료 한도가 낮거나 언제 서비스 종료될지 모르는 이름을 피한 안정판
     3순위. 그마저도 없으면(전부 실험판만 있는 경우) 맨 처음 찾은 flash 모델 그대로"""
 
-    # 🌟 [핵심 우회 로직] 이미 한도가 초과되어 블랙리스트(_EXHAUSTED_MODELS)에 들어간
-    # 모델은 처음부터 사용할 수 있는 모델(valid_models) 목록에서 아예 빼버립니다.
-    valid_models = [m for m in available_models if m not in _EXHAUSTED_MODELS]
+    # 🌟 [핵심 우회 로직] 이미 한도가 초과되어(24시간 이내) 블랙리스트에 들어간 모델은
+    # 처음부터 사용할 수 있는 모델(valid_models) 목록에서 아예 빼버립니다.
+    valid_models = [m for m in available_models if not _is_still_exhausted(m)]
 
     # 살아남은 모델(valid_models) 안에서만 flash 모델을 찾습니다.
     flash_models = [m for m in valid_models if 'flash' in m.lower()]
@@ -95,11 +128,11 @@ def _call_gemini_api(prompt, temperature=0.55):
                         time.sleep(min(wait_s, 20))
                         continue
 
-                    _EXHAUSTED_MODELS.add(target_model)
+                    _mark_exhausted(target_model)
                     _discover_target_model.clear()
 
                     new_target_model = _discover_target_model()
-                    if new_target_model and (new_target_model != target_model) and (new_target_model not in _EXHAUSTED_MODELS):
+                    if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
                         return _call_gemini_api(prompt, temperature)
 
                     return (
@@ -113,11 +146,11 @@ def _call_gemini_api(prompt, temperature=0.55):
                         continue
 
                     # 🌟 [503 서버 과부하 우회 추가!] 구글 서버가 뻗었을 때도 즉시 다른 모델로 갈아탑니다.
-                    _EXHAUSTED_MODELS.add(target_model)
+                    _mark_exhausted(target_model)
                     _discover_target_model.clear()
 
                     new_target_model = _discover_target_model()
-                    if new_target_model and (new_target_model != target_model) and (new_target_model not in _EXHAUSTED_MODELS):
+                    if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
                         return _call_gemini_api(prompt, temperature)
 
                     return f"⚠️ [서버 과부하] 구글 AI 서버가 혼잡하여 다른 모델로 우회하려 했으나 모두 실패했습니다. (상태코드: {res_gen.status_code})"
@@ -138,11 +171,11 @@ def _call_gemini_api(prompt, temperature=0.55):
                     continue
 
                 # 🌟 [타임아웃 무응답 우회 추가!] 응답이 너무 오래 걸려도 버리고 다른 모델로 갈아탑니다.
-                _EXHAUSTED_MODELS.add(target_model)
+                _mark_exhausted(target_model)
                 _discover_target_model.clear()
 
                 new_target_model = _discover_target_model()
-                if new_target_model and (new_target_model != target_model) and (new_target_model not in _EXHAUSTED_MODELS):
+                if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
                     return _call_gemini_api(prompt, temperature)
 
                 return f"⚠️ 네트워크 통신 오류(Timeout 등)가 지속되어 중지합니다: {str(req_e)}"
@@ -152,13 +185,18 @@ def _call_gemini_api(prompt, temperature=0.55):
 
 
 def _format_chat_history(chat_history):
-    """[{'role': 'user'/'ai', 'text': '...'}] 리스트를 프롬프트에 넣을 문자열로 변환."""
+    """[{'role': 'user'/'ai', 'text': '...'}] 리스트를 프롬프트에 넣을 문자열로 변환.
+    🌟 [에러 오염 방지] 과거 턴 중 API 실패로 인한 안내 문구(⚠️로 시작)는 실제 AI
+    발언이 아니므로, 다음 턴 프롬프트에 다시 섞여 들어가지 않도록 제외한다."""
     if not chat_history:
         return "(아직 대화 없음)"
     lines = []
     for turn in chat_history:
+        text = turn.get('text', '')
+        if turn.get("role") != "user" and is_api_error(text):
+            continue
         speaker = "실무자" if turn.get("role") == "user" else "AI"
-        lines.append(f"{speaker}: {turn.get('text', '')}")
+        lines.append(f"{speaker}: {text}")
     return "\n".join(lines)
 
 
