@@ -5,7 +5,7 @@
 # 의도 그대로, 이제는 파일로도 분리되어 실제로 테스트하기 쉬워졌다).
 # ============================================================
 import json
-from ai_engine.gemini_api import generate_target_chat_reply
+from ai_engine.gemini_api import generate_target_chat_reply, generate_segment_insight_reply, is_api_error
 from database.db_manager import (
     summarize_profile_context, summarize_segment_insight, format_segment_insight_reply,
     _normalize_field_name,
@@ -83,10 +83,30 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
         canonical_field = _normalize_field_name(field)
         if canonical_field:
             merged_conditions.pop(canonical_field, None)
-            
+
     if isinstance(question_conditions, dict) and question_conditions:
         insight = summarize_segment_insight(profile_df, question_conditions, db_audience)
-        reply_text = format_segment_insight_reply(insight)
-
+        # 🌟 [DB 질문응답 고도화] 여태까지는 실제 계산(insight)까지는 잘 해놓고도,
+        # 그 결과를 프롬프트(get_segment_insight_prompt)로 AI에게 넘겨 자연스러운
+        # 문장으로 답하게 하는 generate_segment_insight_reply()가 어디에서도 호출되지
+        # 않고 있었다 - 대신 항상 format_segment_insight_reply()라는 고정된 파이썬
+        # 문자열 템플릿("~명이에요. ~순으로 많이 봤어요. 타겟을 잡아볼까요?")만 써서,
+        # 실무자가 어떻게 물어봤든 늘 똑같은 기계적인 문장이 나갔다. 이제는 계산된
+        # 결과가 있을 때(대상자수 > 0)는 실제로 AI를 한 번 더 호출해서, 실무자가
+        # 물어본 질문 자체(user_text)에 맞춰 자연스럽게 답하게 한다. 데이터가 없거나
+        # (0명) AI 호출이 실패하면(is_api_error) 기존의 확정적인 템플릿 문장으로
+        # 안전하게 되돌아간다 - 이 프롬프트도 "실제 계산된 수치만 근거로 답해"라고
+        # 못박아 두었으므로(get_segment_insight_prompt), 숫자를 지어낼 위험은 없다.
+        fallback_reply = format_segment_insight_reply(insight)
+        if insight and insight.get('대상자수', 0) > 0:
+            ai_insight_reply = generate_segment_insight_reply(
+                user_text,
+                json.dumps(question_conditions, ensure_ascii=False),
+                json.dumps(insight, ensure_ascii=False),
+            )
+            reply_text = fallback_reply if is_api_error(ai_insight_reply) else ai_insight_reply
+        else:
+            reply_text = fallback_reply
+            
     new_messages = history_with_user + [{"role": "assistant", "text": reply_text}]
     return new_messages, merged_conditions
