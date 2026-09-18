@@ -1,8 +1,5 @@
 # database/audience.py
-# ============================================================
-# 🌟 [모듈화] database/db_manager.py에서 "오디언스(시청자) 집계와 타겟 조건
-# 필터링" 관련 로직만 분리.
-# ============================================================
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -166,9 +163,25 @@ def summarize_profile_context(profile_df):
 
 
 def _matching_ids_by_keyword(db_audience, col_name, keyword):
+    """
+    🌟 [버그 수정 - 조건 넓히기 시 대상자 감소] 콘텐츠명포함/채널명포함은 문자열 하나만
+    받는 필드라, 실무자가 "캠핑 또는 낚시도 넣어줘"처럼 넓혀달라고 하면 AI가 그 의도를
+    "캠핑|낚시"처럼 파이프로 합쳐서 표현하는 경우가 있었다. 그런데 str.contains()를
+    regex=False로 쓰고 있어서 그 파이프가 OR 연산자가 아니라 글자 그대로 취급됐고,
+    결과적으로 "캠핑|낚시"라는 문자열이 통째로 들어있는 영상명만 찾는 꼴이 되어
+    거의 아무도 안 걸렸다(조건을 넓혔는데 오히려 대상자가 줄어드는 원인이었다).
+    이제 keyword를 _as_list()로 먼저 여러 값으로 쪼갠 뒤, 각 값을 여전히 안전한
+    리터럴(regex=False) 부분일치로 검사하고 결과를 OR로 합친다 - 정규식을 직접 쓰지
+    않으므로 AI가 특수문자가 섞인 값을 보내도 예상치 못한 패턴으로 깨질 위험이 없다.
+    """
     if db_audience is None or db_audience.empty or col_name not in db_audience.columns or not keyword:
         return set()
-    mask = db_audience[col_name].astype(str).str.contains(str(keyword), case=False, na=False, regex=False)
+    terms = _as_list(keyword)
+    if not terms:
+        return set()
+    mask = pd.Series(False, index=db_audience.index)
+    for term in terms:
+        mask = mask | db_audience[col_name].astype(str).str.contains(str(term), case=False, na=False, regex=False)
     return set(db_audience.loc[mask, 'R고객번호'].astype(str).unique().tolist())
 
 
@@ -177,6 +190,9 @@ def _as_list(val):
         return []
     if isinstance(val, (list, tuple, set)):
         return list(val)
+    if isinstance(val, str):
+        parts = [p.strip() for p in re.split(r'[,/|]|또는|혹은', val) if p.strip()]
+        return parts if parts else [val]
     return [val]
 
 
