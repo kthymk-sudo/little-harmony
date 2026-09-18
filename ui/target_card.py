@@ -102,7 +102,7 @@ def render_target_card():
                 st.rerun()
 
         if st.session_state.phase == 'copywriting':
-            st.caption("아래 채팅창에 원하는 방향을 입력하면 방금 만든 카피를 다시 다듬어드립니다. (예: 더 친근하게, 이벤트 느낌으로)")
+            st.caption("아래 채팅창에 원하는 방향을 입력하면 방금 만든 카피를 다시 다듬어드립니다. (예:이벤트, 친근한 느낌)")
             if st.button("🎯 타겟 조건 다시 설정하기", width='stretch'):
                 st.session_state.phase = 'targeting'
                 st.session_state.messages.append({
