@@ -56,8 +56,6 @@ def render_chat_app(profile_df, db_audience=None):
         if should_animate:
             st.session_state.stream_next = False
         if i == anchor_idx:
-            if st.session_state.target_conditions and st.session_state.phase == 'targeting':
-                render_confirm_bar(profile_df, db_audience)
             render_target_card()
 
     if st.session_state.get('pending_copy_start'):
@@ -103,9 +101,8 @@ def render_chat_app(profile_df, db_audience=None):
         autosave()
         st.rerun()
 
-    # ---- 조건 확정 액션 바 (아직 한 번도 타겟을 확정한 적 없는 경우에만 메시지 맨 끝에 표시.
-    #      한 번이라도 확정한 뒤에는 위 메시지 루프에서 카드 바로 위에 표시된다) ----
-    if anchor_idx is None and st.session_state.target_conditions and st.session_state.phase == 'targeting':
+    # ---- 조건 확정 액션 바 ----
+    if st.session_state.target_conditions and st.session_state.phase == 'targeting':
         render_confirm_bar(profile_df, db_audience)
 
     # ---- 확정된 타겟 결과 카드 (위 메시지 루프에서 자리를 못 찾은 경우의 폴백) ----
