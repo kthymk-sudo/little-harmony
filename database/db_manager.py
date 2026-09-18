@@ -25,6 +25,7 @@ from database.audience import (
     build_audience_db, build_audience_profile, filter_by_period, summarize_profile_context,
     summarize_segment_insight, format_segment_insight_reply, apply_target_conditions,
     _matching_ids_by_keyword, _as_list, _to_num, _filter_by_conditions,
+    _parse_recent_date_condition, _normalize_field_name,
 )
 from database.formatting import (
     format_conditions_line, format_target_summary,

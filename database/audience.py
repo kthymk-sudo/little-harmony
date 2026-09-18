@@ -195,6 +195,102 @@ def _as_list(val):
         return parts if parts else [val]
     return [val]
 
+def _parse_recent_date_condition(val, db_audience=None):
+    """
+    🌟 [버그 수정 - 날짜 조건 형식 불일치] '최근시청일이후'는 AI가 자유 텍스트로
+    채우는 필드인데, 프롬프트에 형식 지침이 없던 시절에는 아래처럼 단순 문자열
+    비교만 하고 있었다:
+        df['최근시청일'] >= str(conditions['최근시청일이후'])
+    데이터의 '최근시청일'은 항상 'YYYY-MM-DD' 문자열인데, 실무자가 "최근 30일
+    이내" "3개월 전부터"처럼 말하면 AI가 그 표현을 그대로("30일 이내", "3개월 전")
+    돌려주거나 "2026.07.01"/"2026/07/01"처럼 다른 구분자로 줄 수 있다. 이 경우
+    문자열 비교가 조용히 전원 탈락(대상자 0명)으로 이어진다 - 콘텐츠명포함의
+    파이프 문제와 같은 계열의 버그. 아래처럼 절대 날짜/상대 표현을 모두 안전하게
+    해석하고, 무엇도 해석이 안 되면 차라리 조건을 무시한다(에러 없이 전원 탈락
+    시키는 것보다, 조건 하나를 못 알아들었다고 무시하는 편이 안전하다는 원칙).
+    """
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return None  # 숫자 하나만 덩그러니 온 경우는 의미가 모호해 무시
+
+    text = str(val).strip()
+    if not text:
+        return None
+
+    # 1) 절대 날짜로 바로 해석 시도 (구분자가 -, ., / 등이어도 pandas가 대부분 흡수)
+    parsed = pd.to_datetime(text, errors='coerce')
+    if pd.notna(parsed):
+        return parsed.strftime('%Y-%m-%d')
+
+    # 2) "숫자 + 단위(일/주/개월/달/년)" 형태의 상대적 표현 시도
+    #    ("이내", "전", "이후" 등 접미사는 무시하고 숫자·단위만 사용)
+    m = re.search(r'(\d+)\s*(일|주|개월|달|년)', text)
+    if m:
+        n = int(m.group(1))
+        days_per_unit = {'일': 1, '주': 7, '개월': 30, '달': 30, '년': 365}
+        offset_days = n * days_per_unit[m.group(2)]
+
+        # 기준점은 실제 '오늘'이 아니라 데이터상 가장 최근 시청일로 삼는다
+        # (activity 세그먼트 계산에 쓰는 ref_date와 같은 기준 - 업로드된 데이터가
+        # 과거 시점이어도 "최근"의 의미가 어긋나지 않게 하기 위함).
+        ref_date = None
+        if db_audience is not None and not db_audience.empty and '시청일' in db_audience.columns:
+            ref_date = pd.to_datetime(db_audience['시청일'], errors='coerce').max()
+        if ref_date is None or pd.isna(ref_date):
+            ref_date = pd.Timestamp.today()
+
+        cutoff = ref_date - pd.Timedelta(days=offset_days)
+        return cutoff.strftime('%Y-%m-%d')
+
+    # 3) 둘 다 실패하면 조건을 무시 (전원 탈락시키는 것보다 안전)
+    return None
+
+
+# 🌟 [버그 수정 - 조건 삭제 시 필드명 불일치] "나이 조건 빼줘"를 처리할 때 AI가
+# 필드명을 스키마와 정확히 똑같이("나이대") 써야만 삭제가 되는데, 대화 맥락상
+# "나이", "연령대"처럼 살짝 다르게 쓰면 dict.pop()이 조용히 아무 일도 하지 않고
+# 넘어간다 - 실무자 입장에서는 "빼달라고 했는데 안 빠졌다"로 보이는, 역시 같은
+# 계열의 버그. 실제로 나올 법한 표현들을 정식 필드명으로 매핑해 흡수한다.
+_CANONICAL_CONDITION_FIELDS = {
+    '성별', '나이대', '나이최소', '나이최대', 'SO', '선호장르', '선호시청시간대',
+    '선호채널', '선호메뉴', '최소시청횟수', '최근시청일이후', '최소시청유지율',
+    '최소총시청시간_분', '최소시청콘텐츠수', '활동세그먼트', '콘텐츠명포함',
+    '채널명포함', '제외조건',
+}
+
+_CONDITION_FIELD_ALIASES = {
+    '나이': '나이대', '연령': '나이대', '연령대': '나이대',
+    '지역': 'SO', '거주지역': 'SO', 'so지역': 'SO',
+    '장르': '선호장르',
+    '시간대': '선호시청시간대', '시청시간대': '선호시청시간대',
+    '채널': '선호채널',
+    '메뉴': '선호메뉴',
+    '시청횟수': '최소시청횟수',
+    '최근시청일': '최근시청일이후', '최근시청': '최근시청일이후',
+    '시청유지율': '최소시청유지율', '유지율': '최소시청유지율',
+    '총시청시간': '최소총시청시간_분', '시청시간': '최소총시청시간_분',
+    '시청콘텐츠수': '최소시청콘텐츠수', '콘텐츠수': '최소시청콘텐츠수',
+    '세그먼트': '활동세그먼트', '활동': '활동세그먼트',
+    '콘텐츠명': '콘텐츠명포함', '콘텐츠': '콘텐츠명포함',
+    '채널명': '채널명포함',
+    '제외': '제외조건',
+}
+
+
+def _normalize_field_name(name):
+    """'삭제할조건'에 담긴 필드명을 정식 스키마 필드명으로 정규화한다.
+    정식 명칭이면 그대로, 흔히 쓸 법한 다른 표현이면 별칭 매핑으로, 어느 쪽에도
+    없으면 None을 반환해 호출부가 "모르는 필드는 그냥 무시"하도록 한다."""
+    if not name:
+        return None
+    text = str(name).strip()
+    if text in _CANONICAL_CONDITION_FIELDS:
+        return text
+    if text.lower() == 'so':
+        return 'SO'
+    return _CONDITION_FIELD_ALIASES.get(text)
+
 
 def _to_num(val):
     if val is None:
@@ -236,7 +332,9 @@ def _filter_by_conditions(profile_df, conditions, db_audience=None):
     if min_watch_cnt is not None:
         df = df[pd.to_numeric(df['시청횟수'], errors='coerce') >= min_watch_cnt]
     if conditions.get('최근시청일이후'):
-        df = df[df['최근시청일'] >= str(conditions['최근시청일이후'])]
+        cutoff = _parse_recent_date_condition(conditions['최근시청일이후'], db_audience)
+        if cutoff is not None:
+            df = df[df['최근시청일'] >= cutoff]
     min_retention = _to_num(conditions.get('최소시청유지율'))
     if min_retention is not None and '평균시청유지율' in df.columns:
         df = df[pd.to_numeric(df['평균시청유지율'], errors='coerce') >= min_retention]

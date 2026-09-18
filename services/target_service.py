@@ -6,7 +6,10 @@
 # ============================================================
 import json
 from ai_engine.gemini_api import generate_target_chat_reply
-from database.db_manager import summarize_profile_context, summarize_segment_insight, format_segment_insight_reply
+from database.db_manager import (
+    summarize_profile_context, summarize_segment_insight, format_segment_insight_reply,
+    _normalize_field_name,
+)
 from utils.response_parser import parse_target_conditions
 from utils.naver_search import search_term_meaning
 
@@ -71,9 +74,16 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
 
     # 🌟 [조건 삭제 지원] 위 병합 로직은 "빈 값=언급 안 함(유지)"으로 취급하므로, 실제
     # 삭제는 AI가 명시적으로 알려준 필드에 한해 여기서 최종적으로 한 번 더 지워준다.
+    # 🌟 [버그 수정 - 필드명 불일치] AI가 "나이대" 대신 "나이"/"연령대"처럼 스키마와
+    # 살짝 다른 이름을 쓰면 정확 일치 pop()은 조용히 아무 일도 안 해서 "빼달라고
+    # 했는데 안 빠졌다"로 보였다. _normalize_field_name()으로 정식 필드명으로
+    # 바꾼 뒤 지운다 (어떤 필드로도 매핑되지 않으면 무시 - 무리하게 아무 필드나
+    # 지우는 것보다 안전).
     for field in fields_to_delete:
-        merged_conditions.pop(field, None)
-
+        canonical_field = _normalize_field_name(field)
+        if canonical_field:
+            merged_conditions.pop(canonical_field, None)
+            
     if isinstance(question_conditions, dict) and question_conditions:
         insight = summarize_segment_insight(profile_df, question_conditions, db_audience)
         reply_text = format_segment_insight_reply(insight)
