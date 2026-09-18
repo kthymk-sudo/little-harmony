@@ -54,6 +54,14 @@ def _fresh_conversation_state():
         # 🌟 [응답 순서 개선용] 사용자 메시지를 먼저 화면에 그린 뒤, 다음 rerun에서
         # 이 값이 있으면 그때 AI 응답을 생성한다 (사용자 메시지 즉시 표시를 위함).
         'pending_user_text': None,
+        # 🌟 [버그 수정 - 대화 전환 시 상태 누수] 앱푸시/SMS 카피 생성 버튼의 활성/비활성
+        # 상태와 마지막으로 만든 카피 종류. 이 값들이 초기화 목록에 없으면, A 대화에서
+        # 카피를 만든 뒤 B 대화로 전환해도 이 값이 그대로 남아 B에서 카피를 만든 적이
+        # 없는데도 버튼이 비활성화된 것처럼 보이는 문제가 있었다.
+        'push_copy_generated': False,
+        'sms_copy_generated': False,
+        'last_copy_type': 'push',
+        'pending_copy_start': None,
     }
 
 
@@ -91,3 +99,11 @@ def load_conversation_into_session(conv_state):
     # 저장된 대화를 불러올 때는 과거 메시지이므로 타이핑 애니메이션을 절대 재생하지 않는다
     st.session_state.stream_next = False
     st.session_state.greet_stream_pending = False
+    # 🌟 [버그 수정 - 대화 전환 시 상태 누수] 지금은 대화별로 "카피를 만들었는지" 자체를
+    # DB에 따로 저장하지 않으므로(카피 텍스트 자체만 push_copy_result로 저장됨), 대화를
+    # 불러올 때마다 이 대화가 새로 시작하는 것처럼 항상 초기화한다. 그렇지 않으면 방금 전
+    # 대화에서 만든 값이 그대로 남아 지금 불러온 이 대화의 버튼 상태를 오염시킨다.
+    st.session_state.push_copy_generated = False
+    st.session_state.sms_copy_generated = False
+    st.session_state.last_copy_type = 'push'
+    st.session_state.pending_copy_start = None
