@@ -6,7 +6,7 @@
 # ============================================================
 import io
 import streamlit as st
-from ai_engine.gemini_api import generate_target_reasoning
+from ai_engine.gemini_api import generate_target_reasoning, is_api_error
 from database.db_manager import (
     apply_target_conditions, format_target_summary, format_conditions_line,
     save_conversation, make_conversation_title,
@@ -77,6 +77,12 @@ def render_target_card():
                 width='stretch',
             )
 
+        # 🌟 [에러 오염 방지] render_confirm_bar에서 근거 생성이 실패하면 target_reasoning을
+        # 빈 값으로 남겨둔다(에러 문구를 정상 근거처럼 저장하지 않기 위해). 그 상태로
+        # 대화를 나중에 다시 열어봤을 때도 왜 근거가 없는지 알 수 있도록 안내한다.
+        if not st.session_state.get('target_reasoning'):
+            st.caption("⚠️ AI 근거 설명 생성에 실패했었습니다. 채팅창에 메시지를 입력하면 조건이 다시 처리되면서 근거도 함께 갱신됩니다.")
+
         col_push, col_sms = st.columns(2)
         with col_push:
             if st.button(
@@ -97,7 +103,15 @@ def render_target_card():
 
         if st.session_state.phase == 'copywriting':
             st.caption("아래 채팅창에 원하는 방향을 입력하면 방금 만든 카피를 다시 다듬어드립니다. (예: 더 친근하게, 이벤트 느낌으로)")
-
+            if st.button("🎯 타겟 조건 다시 설정하기", width='stretch'):
+                st.session_state.phase = 'targeting'
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "text": "네, 타겟 조건을 다시 조정해볼까요? 어떤 부분을 바꾸고 싶으신지 말씀해주세요.",
+                })
+                st.session_state.stream_next = True
+                autosave()
+                st.rerun()
 
 def render_confirm_bar(profile_df, db_audience):
     """'이 조건으로 타겟 확정하기' 안내문 + 버튼을 그린다.
@@ -113,14 +127,34 @@ def render_confirm_bar(profile_df, db_audience):
             target_df, stats = apply_target_conditions(profile_df, st.session_state.target_conditions, db_audience)
             summary_str = format_target_summary(st.session_state.target_conditions, stats)
             reasoning = generate_target_reasoning(str(st.session_state.target_conditions), str(stats))
+
+        # 🌟 [에러 오염 방지] 대상자 수 계산(target_df/stats)은 AI 호출과 무관하게 항상
+        # 성공하므로, 근거(reasoning) 생성이 실패했더라도 결과 카드(엑셀 다운로드 포함)는
+        # 그대로 보여준다. 다만 실패 문구를 정상 근거처럼 저장/전달하면 (1) 다음 대화
+        # 턴 프롬프트에 "AI: ⚠️..."로 섞여 들어가고 (2) 이후 카피 생성 프롬프트에도
+        # 에러 문구가 그대로 들어가 버리므로, 반드시 여기서 걸러낸다.
         st.session_state.target_result_df = target_df
         st.session_state.target_result_stats = stats
         st.session_state.target_summary_str = summary_str
-        st.session_state.target_reasoning = reasoning
         # 🌟 [카피 타입 분리] 새로 타겟을 확정할 때마다 앱푸시/SMS 버튼을 다시 눌러
         # 만들 수 있도록 두 생성 여부 플래그를 초기화한다.
         st.session_state.push_copy_generated = False
         st.session_state.sms_copy_generated = False
+
+        if is_api_error(reasoning):
+            st.session_state.target_reasoning = ""
+            autosave()
+            st.error(
+                f"대상자 수 계산은 완료됐지만, AI 근거 설명 생성에는 실패했습니다.\n\n{reasoning}\n\n"
+                "대상자 목록 다운로드는 아래 카드에서 바로 가능합니다. 근거 설명은 채팅창에 "
+                "메시지를 입력해 조건을 다시 처리하면 함께 다시 생성됩니다."
+            )
+            # 🌟 실패 시에는 rerun하지 않는다 - rerun하면 이 안내가 화면에서 바로 사라져
+            # 실무자가 무슨 일이 있었는지 못 보고 지나칠 수 있다. 이번 실행 안에서
+            # 아래쪽 렌더링(결과 카드)이 이어서 그려지므로 카드도 함께 바로 보인다.
+            return
+
+        st.session_state.target_reasoning = reasoning
         st.session_state.messages.append({
             "role": "assistant",
             "text": f"총 {stats.get('대상자수', 0)}명이 이 조건에 해당합니다.\n\n{reasoning}",
