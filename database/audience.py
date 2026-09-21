@@ -6,6 +6,9 @@ import streamlit as st
 from config import ACTIVE_SEGMENT_DAYS, DORMANT_SEGMENT_DAYS
 from utils.data_cleaner import standardize_columns
 
+_PREFERENCE_RATIO_THRESHOLD = 0.6
+_PREFERENCE_MIN_COUNT = 2
+
 
 @st.cache_data(show_spinner=False, persist="disk", max_entries=10)
 def build_audience_db(_df_history, _df_employee, version=None):
@@ -50,31 +53,50 @@ def build_audience_profile(_db_audience, version=None):
     base_cols = [c for c in ['R고객번호', '이웃고객명', '성별', '나이', '시청자SO'] if c in df.columns]
     base_info = df[base_cols].drop_duplicates(subset=['R고객번호'], keep='first')
 
-    def _mode_by_customer(col_name, out_name):
+    def _pref_list_by_customer(col_name, out_name):
+        """
+        🌟 [취향 다각도 분석] 예전에는 이 함수가 고객별 최빈값(시청 횟수 1위) 딱
+        하나만 뽑았다("선호장르"가 문자열 1개). 그런데 드라마 100번, 다큐 99번을
+        본 사람도 그 방식으로는 "선호장르=드라마"로만 기록되고 다큐 취향은
+        통째로 사라진다 - 실무자가 지적한 대로, 1위와 거의 차이가 안 나는 항목도
+        "이 사람이 실제로 좋아하는 것"으로 보는 게 자연스럽다.
+        그래서 순위를 top2/top3처럼 고정 개수로 자르는 대신, "그 고객의 1위
+        시청 횟수 대비 일정 비율(_PREFERENCE_RATIO_THRESHOLD) 이상 본 항목"을
+        전부 선호 목록에 담는다 - 드라마 100/다큐 99처럼 박빙이면 둘 다, 드라마
+        100/다큐 1처럼 격차가 크면 다큐는 자동으로 빠진다. 다만 아주 적게(1~2번)
+        본 항목까지 우연히 "선호"로 잡히는 걸 막기 위해 절대 횟수 하한
+        (_PREFERENCE_MIN_COUNT)도 같이 둔다 - 단, 그 고객의 1위 항목만큼은
+        하한 미만이어도(그 사람이 딱 1번만 시청한 경우 등) 항상 포함시켜서,
+        데이터가 적은 고객이 선호 목록 자체가 통째로 비어버리는 일은 없게 한다.
+        결과 컬럼(out_name)은 예전과 달리 "리스트"를 담는다 - 이 값을 쓰는
+        쪽(필터링/화면표시/집계)도 리스트를 다루도록 같이 손봐야 한다.
+        """
         if col_name not in df.columns:
             return pd.DataFrame(columns=['R고객번호', out_name])
         valid = df[df[col_name].notna() & (df[col_name].astype(str).str.strip() != '')]
         if valid.empty:
             return pd.DataFrame(columns=['R고객번호', out_name])
 
-        valid = valid.reset_index(drop=True)
-        counts = (
-            valid.assign(__order=valid.index)
-            .groupby(['R고객번호', col_name])
-            .agg(__cnt=('__order', 'size'), __first=('__order', 'min'))
-            .reset_index()
+        counts = valid.groupby(['R고객번호', col_name]).size().reset_index(name='__cnt')
+        max_per_customer = counts.groupby('R고객번호')['__cnt'].transform('max')
+        is_top = counts['__cnt'] >= max_per_customer  # 동률 1위는 전부 top으로 인정
+        clears_bar = (counts['__cnt'] >= max_per_customer * _PREFERENCE_RATIO_THRESHOLD) & \
+            (counts['__cnt'] >= _PREFERENCE_MIN_COUNT)
+        qualified = counts[is_top | clears_bar].sort_values(
+            ['R고객번호', '__cnt'], ascending=[True, False], kind='mergesort'
         )
-        counts = counts.sort_values(['__cnt', '__first'], ascending=[False, True], kind='mergesort')
         result = (
-            counts.drop_duplicates(subset='R고객번호', keep='first')[['R고객번호', col_name]]
+            qualified.groupby('R고객번호')[col_name]
+            .apply(list)
+            .reset_index()
             .rename(columns={col_name: out_name})
         )
         return result
 
-    pref_genre = _mode_by_customer('장르', '선호장르')
-    pref_time = _mode_by_customer('시청시간대', '선호시청시간대')
-    pref_channel = _mode_by_customer('채널명', '선호채널')
-    pref_menu = _mode_by_customer('메뉴명', '선호메뉴')
+    pref_genre = _pref_list_by_customer('장르', '선호장르')
+    pref_time = _pref_list_by_customer('시청시간대', '선호시청시간대')
+    pref_channel = _pref_list_by_customer('채널명', '선호채널')
+    pref_menu = _pref_list_by_customer('메뉴명', '선호메뉴')
 
     agg_dict = {'시청콘텐츠수': ('콘텐츠ID', 'nunique'), '시청횟수': ('콘텐츠ID', 'count')}
     if '시청시간' in df.columns:
@@ -105,9 +127,12 @@ def build_audience_profile(_db_audience, version=None):
         if c not in profile.columns:
             profile[c] = np.nan
 
-    return profile.fillna({
-        '선호장르': '', '선호시청시간대': '', '선호채널': '', '선호메뉴': '', '활동세그먼트': '미분류',
-    })
+    profile = profile.fillna({'활동세그먼트': '미분류'})
+    for col in ['선호장르', '선호시청시간대', '선호채널', '선호메뉴']:
+        if col in profile.columns:
+            profile[col] = profile[col].apply(lambda v: v if isinstance(v, list) else [])
+
+    return profile
 
 
 def summarize_profile_context(profile_df):
@@ -116,10 +141,20 @@ def summarize_profile_context(profile_df):
 
     gender_counts = profile_df['성별'].value_counts().to_dict() if '성별' in profile_df.columns else {}
     so_list = sorted(profile_df['시청자SO'].dropna().unique().tolist()) if '시청자SO' in profile_df.columns else []
-    genre_list = sorted([g for g in profile_df['선호장르'].dropna().unique().tolist() if g]) if '선호장르' in profile_df.columns else []
-    time_list = sorted([t for t in profile_df['선호시청시간대'].dropna().unique().tolist() if t]) if '선호시청시간대' in profile_df.columns else []
-    channel_list = sorted([c for c in profile_df['선호채널'].dropna().unique().tolist() if c]) if '선호채널' in profile_df.columns else []
-    menu_list = sorted([m for m in profile_df['선호메뉴'].dropna().unique().tolist() if m]) if '선호메뉴' in profile_df.columns else []
+
+    def _flatten_unique(col):
+        if col not in profile_df.columns:
+            return []
+        vals = profile_df[col].dropna()
+        if vals.empty:
+            return []
+        exploded = vals.explode().dropna()
+        return sorted([v for v in exploded.unique().tolist() if v])
+
+    genre_list = _flatten_unique('선호장르')
+    time_list = _flatten_unique('선호시청시간대')
+    channel_list = _flatten_unique('선호채널')
+    menu_list = _flatten_unique('선호메뉴')
     segment_counts = (
         profile_df[profile_df['활동세그먼트'] != '미분류']['활동세그먼트'].value_counts().to_dict()
         if '활동세그먼트' in profile_df.columns else {}
@@ -194,6 +229,31 @@ def _as_list(val):
         parts = [p.strip() for p in re.split(r'[,/|]|또는|혹은', val) if p.strip()]
         return parts if parts else [val]
     return [val]
+
+
+def _series_intersects(series, target_values):
+    """
+    🌟 [취향 다각도 분석] 선호장르/선호채널/선호메뉴/선호시청시간대는 이제 고객별로
+    "리스트"를 담는다(_pref_list_by_customer 참고). 예전처럼 .isin()을 그대로
+    쓰면 "그 컬럼의 값이 target_values 중 하나와 정확히 같은가"만 보는데, 컬럼
+    값 자체가 리스트라 어차피 target_values의 원소들과 절대 같아질 수 없어
+    전부 매칭 실패한다. 대신 "그 고객의 선호 리스트와 실무자가 요청한 값
+    목록이 하나라도 겹치는가"로 바꿔야 한다 - 드라마/다큐를 둘 다 선호하는
+    고객은 "드라마 좋아하는 사람" 조건에도, "다큐 좋아하는 사람" 조건에도
+    똑같이 매칭되는 게 맞다.
+    """
+    target_set = {str(v) for v in target_values}
+
+    def _has_overlap(prefs):
+        if prefs is None:
+            return False
+        if isinstance(prefs, (list, tuple, set)):
+            return bool({str(p) for p in prefs} & target_set)
+        # 혹시 과거 데이터/다른 경로로 아직 스칼라 값이 들어와도 방어적으로 처리
+        return str(prefs) in target_set
+
+    return series.apply(_has_overlap)
+
 
 def _parse_recent_date_condition(val, db_audience=None):
     """
@@ -318,14 +378,17 @@ def _filter_by_conditions(profile_df, conditions, db_audience=None):
         df = df[pd.to_numeric(df['나이'], errors='coerce') <= max_age]
     if conditions.get('SO'):
         df = df[df['시청자SO'].isin(_as_list(conditions['SO']))]
+    # 🌟 [취향 다각도 분석] 선호장르/선호시청시간대/선호채널/선호메뉴는 이제 고객별로
+    # 여러 값을 담는 리스트 컬럼이라(_pref_list_by_customer), .isin() 대신
+    # "겹치는 게 있는지"를 보는 _series_intersects()로 필터링한다.
     if conditions.get('선호장르'):
-        df = df[df['선호장르'].isin(_as_list(conditions['선호장르']))]
+        df = df[_series_intersects(df['선호장르'], _as_list(conditions['선호장르']))]
     if conditions.get('선호시청시간대'):
-        df = df[df['선호시청시간대'].isin(_as_list(conditions['선호시청시간대']))]
+        df = df[_series_intersects(df['선호시청시간대'], _as_list(conditions['선호시청시간대']))]
     if conditions.get('선호채널') and '선호채널' in df.columns:
-        df = df[df['선호채널'].isin(_as_list(conditions['선호채널']))]
+        df = df[_series_intersects(df['선호채널'], _as_list(conditions['선호채널']))]
     if conditions.get('선호메뉴') and '선호메뉴' in df.columns:
-        df = df[df['선호메뉴'].isin(_as_list(conditions['선호메뉴']))]
+        df = df[_series_intersects(df['선호메뉴'], _as_list(conditions['선호메뉴']))]
     if conditions.get('활동세그먼트') and '활동세그먼트' in df.columns:
         df = df[df['활동세그먼트'].isin(_as_list(conditions['활동세그먼트']))]
     min_watch_cnt = _to_num(conditions.get('최소시청횟수'))
@@ -366,11 +429,15 @@ def summarize_segment_insight(profile_df, conditions, db_audience=None, top_n=3)
         if col not in df.columns:
             return []
         s = df[col].dropna()
+        if s.empty:
+            return []
+        if len(s) > 0 and isinstance(s.iloc[0], list):
+            s = s.explode().dropna()
         s = s[s != '']
         if s.empty:
             return []
         return [f"{name}({int(cnt)}명)" for name, cnt in s.value_counts().head(top_n).items()]
-
+    
     def _mean(col, divide=1):
         if col not in df.columns or df.empty:
             return 0
