@@ -30,6 +30,17 @@ def _format_condition_parts(conditions):
     return parts
 
 
+def _format_top_n_part(top_n_cond):
+    """🌟 [상위 N명 타겟팅] '상위N명'은 {"인원수": ?, "기준": ?} 형태의 dict라
+    _format_condition_parts()의 일반 라벨 매핑(값을 그대로 이어붙이는 방식)으로는
+    "상위 N명={'인원수': 100, ...}"처럼 보기 흉하게 나온다. 제외조건과 마찬가지로
+    별도로 사람이 읽기 좋은 문장으로 바꾼다."""
+    if not isinstance(top_n_cond, dict) or not top_n_cond.get('인원수'):
+        return None
+    metric_label = top_n_cond.get('기준') or '충성도/몰입도 복합점수'
+    return f"상위 {top_n_cond['인원수']}명({metric_label} 기준)"
+
+
 def _build_cond_str(conditions, empty_text):
     conditions = conditions or {}
     cond_parts = _format_condition_parts(conditions)
@@ -38,6 +49,9 @@ def _build_cond_str(conditions, empty_text):
         exclude_parts = _format_condition_parts(exclude_cond)
         if exclude_parts:
             cond_parts.append(f"제외: {', '.join(exclude_parts)}")
+    top_n_part = _format_top_n_part(conditions.get('상위N명'))
+    if top_n_part:
+        cond_parts.append(top_n_part)
     return ", ".join(cond_parts) if cond_parts else empty_text
 
 

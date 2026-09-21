@@ -341,7 +341,7 @@ _CANONICAL_CONDITION_FIELDS = {
     '성별', '나이대', '나이최소', '나이최대', 'SO', '선호장르', '선호시청시간대',
     '선호채널', '선호메뉴', '최소시청횟수', '최근시청일이후', '최소시청유지율',
     '최소총시청시간_분', '최소시청콘텐츠수', '활동세그먼트', '콘텐츠명포함',
-    '채널명포함', '제외조건',
+    '채널명포함', '제외조건', '상위N명',
 }
 
 _CONDITION_FIELD_ALIASES = {
@@ -360,7 +360,41 @@ _CONDITION_FIELD_ALIASES = {
     '콘텐츠명': '콘텐츠명포함', '콘텐츠': '콘텐츠명포함',
     '채널명': '채널명포함',
     '제외': '제외조건',
+    '인원수': '상위N명', '인원수제한': '상위N명', '정원': '상위N명', '상위n명': '상위N명',
 }
+
+# 🌟 [상위 N명 타겟팅] "충성도 높은 상위 100명"처럼 실무자가 조건값(유지율 X%
+# 이상) 대신 정확한 인원수로 타겟을 지정할 때, 어떤 지표 하나로 순위를 매길지
+# 결정하는 매핑. 왼쪽은 AI가 "기준"에 쓸 수 있는 흔한 표현, 오른쪽은 실제
+# profile_df 컬럼(과 "분" 단위로 바꾸려면 나눌 값)이다. 여기 없는 표현이거나
+# "기준"이 비어있으면(예: 그냥 "충성도 높은") _engagement_score()로 계산한
+# 복합 점수를 쓴다 - 실무자가 특정 지표를 콕 집어 말하지 않았는데 임의로 지표
+# 하나만 골라버리면 "왜 하필 이 지표냐"는 오해를 살 수 있기 때문이다.
+_RANKABLE_METRIC_COLUMNS = {
+    '총시청시간': ('총시청시간', 60),
+    '시청유지율': ('평균시청유지율', 1),
+    '시청콘텐츠수': ('시청콘텐츠수', 1),
+    '시청횟수': ('시청횟수', 1),
+}
+
+_RANK_METRIC_ALIASES = {
+    '시청시간': '총시청시간', '시청 시간': '총시청시간',
+    '유지율': '시청유지율',
+    '콘텐츠수': '시청콘텐츠수', '다양성': '시청콘텐츠수',
+    '횟수': '시청횟수',
+}
+
+
+def _normalize_rank_metric(name):
+    """'상위N명'의 '기준' 값을 _RANKABLE_METRIC_COLUMNS의 정식 키로 정규화한다.
+    인식하지 못하는 표현(예: '충성도', '몰입도'처럼 포괄적인 말, 또는 애초에
+    비어있음)은 None을 반환해 호출부가 복합 점수로 자연스럽게 폴백하게 한다."""
+    if not name:
+        return None
+    text = str(name).strip()
+    if text in _RANKABLE_METRIC_COLUMNS:
+        return text
+    return _RANK_METRIC_ALIASES.get(text)
 
 
 def _normalize_field_name(name):
@@ -659,6 +693,68 @@ def format_group_breakdown_reply(breakdown):
     return f"전체 {total:,}명 기준으로 {field_label}별로는 {parts} 순이에요."
 
 
+def _engagement_score(df):
+    """
+    🌟 [상위 N명 타겟팅] 여러 몰입도 지표(평균시청유지율/총시청시간/시청콘텐츠수/
+    시청횟수)를 각각 0~1로 min-max 정규화한 뒤 동일 가중치로 평균 내어 "충성도/
+    몰입도 복합 점수"를 만든다. 실무자가 특정 지표를 콕 집어 말하지 않고 그냥
+    "충성도 높은 상위 100명"처럼 포괄적으로 말했을 때 쓰는 기본 순위 기준이다.
+    데이터가 없는 지표는 0으로 채운다 - 중간값으로 보정하면 시청 기록이 적은
+    사람의 몰입도를 실제보다 부풀리는 셈이 되기 때문이다. 정규화는 현재 순위를
+    매기는 대상 집합(다른 조건으로 이미 좁혀진 df) 안에서 상대적으로 계산되므로,
+    "20대 여성 중 상위 100명"처럼 다른 조건과 결합됐을 때도 그 집단 안에서
+    합리적인 순위가 나온다.
+    """
+    cols = ['평균시청유지율', '총시청시간', '시청콘텐츠수', '시청횟수']
+    scores = []
+    for col in cols:
+        if col not in df.columns:
+            continue
+        vals = pd.to_numeric(df[col], errors='coerce').fillna(0)
+        span = vals.max() - vals.min()
+        norm = (vals - vals.min()) / span if span > 0 else pd.Series(0.0, index=vals.index)
+        scores.append(norm)
+    if not scores:
+        return pd.Series(0.0, index=df.index)
+    return sum(scores) / len(scores)
+
+
+def select_top_n_by_engagement(df, n, metric=None):
+    """
+    🌟 [상위 N명 타겟팅] "충성도 높은 상위 100명"처럼 조건값(유지율 X% 이상)이
+    아니라 정확한 인원수로 타겟을 지정하고 싶을 때 쓴다. 예전에는 AI가 임계값을
+    추측하며 여러 턴에 걸쳐 조정해도(예: 유지율 70%→60%→50%) 정확히 N명을
+    맞추기 어려웠는데, 이 함수는 순위를 매겨 상위 N명을 정확히 한 번에 잘라낸다.
+    metric이 _RANKABLE_METRIC_COLUMNS에 있는 지표명이면 그 지표 하나만으로,
+    아니면(None 포함) _engagement_score()로 계산한 복합 점수로 순위를 매긴다.
+    정렬은 안정 정렬(mergesort)이라 동점자 사이에서는 원래 순서가 유지되므로,
+    "정확히 N명"을 보장하면서도 매번 같은 입력에는 같은 결과가 재현된다.
+    """
+    empty_result = df.iloc[0:0] if df is not None else df
+    if df is None or df.empty or not n or n <= 0:
+        return empty_result, None
+
+    resolved = _RANKABLE_METRIC_COLUMNS.get(metric) if metric else None
+    if resolved:
+        col, divide = resolved
+        if col not in df.columns:
+            return empty_result, None
+        score = pd.to_numeric(df[col], errors='coerce').fillna(0) / divide
+    else:
+        metric = None  # 인식 못한 값이 넘어왔을 수도 있으니 복합 점수임을 명확히
+        score = _engagement_score(df)
+
+    work = df.assign(__score=score.values).sort_values('__score', ascending=False, kind='mergesort')
+    top = work.head(int(n))
+    info = {
+        '기준': metric,  # None이면 복합 점수
+        '요청인원수': int(n),
+        '실제인원수': len(top),
+        '컷오프점수': round(float(top['__score'].iloc[-1]), 3) if len(top) else None,
+    }
+    return top.drop(columns='__score'), info
+
+
 def apply_target_conditions(profile_df, conditions, db_audience=None):
     empty_stats = {
         '대상자수': 0, '전체시청자수': len(profile_df) if profile_df is not None else 0,
@@ -669,7 +765,8 @@ def apply_target_conditions(profile_df, conditions, db_audience=None):
         return profile_df, empty_stats
 
     exclude_cond = conditions.get('제외조건')
-    include_cond = {k: v for k, v in conditions.items() if k != '제외조건'}
+    top_n_cond = conditions.get('상위N명')
+    include_cond = {k: v for k, v in conditions.items() if k not in ('제외조건', '상위N명')}
 
     df = _filter_by_conditions(profile_df.copy(), include_cond, db_audience)
 
@@ -678,6 +775,14 @@ def apply_target_conditions(profile_df, conditions, db_audience=None):
         excluded_ids = set(excluded_df['R고객번호'].astype(str).unique().tolist())
         if excluded_ids:
             df = df[~df['R고객번호'].astype(str).isin(excluded_ids)]
+
+    # 🌟 [상위 N명 타겟팅] 다른 조건(성별/나이대/제외조건 등)으로 이미 좁혀진
+    # 뒤에 마지막 단계로 적용한다 - "20대 여성 중 상위 100명"처럼 다른 조건과
+    # 결합됐을 때, 그 조건에 맞는 사람들 안에서 상위 N명을 뽑아야 자연스럽다.
+    if isinstance(top_n_cond, dict) and _to_num(top_n_cond.get('인원수')):
+        n = int(_to_num(top_n_cond.get('인원수')))
+        metric = _normalize_rank_metric(top_n_cond.get('기준'))
+        df, _ = select_top_n_by_engagement(df, n, metric)
 
     def _mean(frame, col, divide=1):
         if col not in frame.columns or frame.empty:
