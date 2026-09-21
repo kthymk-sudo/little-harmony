@@ -1,0 +1,18 @@
+# .streamlit/config.toml
+# ============================================================
+# 🌟 [디자인 톤 통일] ui/chat_styles.py의 커스텀 CSS는 처음부터 이 파일의
+# primaryColor(#2563EB)와 맞춰서 만들어졌다고 주석에 적혀 있었는데, 실제로는
+# 이 설정 파일 자체가 없었다 - 그래서 스트림릿 기본 테마(주황빛이 도는 빨강,
+# #FF4B4B)가 "＋ 새 대화", "저장", "✅ 이 조건으로 타겟 확정하기" 같은
+# type="primary" 버튼과 체크박스/스피너/경고창 등에 그대로 적용되고 있었다.
+# 거기에 chat_styles.py가 그 버튼들 위에 파란색 그림자(box-shadow)만 덧씌우다
+# 보니, 버튼 자체는 빨갛고 그림자는 파란 - 정확히 "빨갛고 파랗고 정신없는"
+# 상태가 됐던 것. 이 파일을 추가해서 스트림릿 기본 위젯 색 자체를 이미 쓰고
+# 있던 파란 브랜드 톤으로 맞췄다(색상값은 chat_styles.py에서 이미 쓰던 값을
+# 그대로 재사용해 새로운 색을 추가하지 않았다).
+[theme]
+primaryColor = "#2563EB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F4F6FB"
+textColor = "#1B2333"
+font = "sans serif"
