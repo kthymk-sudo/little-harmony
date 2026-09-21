@@ -24,6 +24,8 @@ from database.loader import (
 from database.audience import (
     build_audience_db, build_audience_profile, filter_by_period, summarize_profile_context,
     summarize_segment_insight, format_segment_insight_reply, apply_target_conditions,
+    summarize_content_ranking, format_content_ranking_reply,
+    summarize_group_breakdown, format_group_breakdown_reply,
     _matching_ids_by_keyword, _as_list, _to_num, _filter_by_conditions,
     _parse_recent_date_condition, _normalize_field_name,
 )
@@ -42,6 +44,8 @@ __all__ = [
     "load_from_db", "load_history_period", "load_employee_list", "has_history_data", "optimize_db",
     "build_audience_db", "build_audience_profile", "filter_by_period", "summarize_profile_context",
     "summarize_segment_insight", "format_segment_insight_reply", "apply_target_conditions",
+    "summarize_content_ranking", "format_content_ranking_reply",
+    "summarize_group_breakdown", "format_group_breakdown_reply",
     "format_conditions_line", "format_target_summary",
     "new_conversation_id", "make_conversation_title", "save_conversation", "rename_conversation",
     "list_conversations", "load_conversation", "delete_conversation",

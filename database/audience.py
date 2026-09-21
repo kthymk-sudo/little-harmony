@@ -1,4 +1,8 @@
 # database/audience.py
+# ============================================================
+# 🌟 [모듈화] database/db_manager.py에서 "오디언스(시청자) 집계와 타겟 조건
+# 필터링" 관련 로직만 분리.
+# ============================================================
 import re
 import numpy as np
 import pandas as pd
@@ -6,6 +10,10 @@ import streamlit as st
 from config import ACTIVE_SEGMENT_DAYS, DORMANT_SEGMENT_DAYS
 from utils.data_cleaner import standardize_columns
 
+# 🌟 [취향 다각도 분석] 선호장르/선호채널/선호메뉴/선호시청시간대를 "1위 하나"가
+# 아니라 "1위와 충분히 근접한 항목 전부"로 잡기 위한 기준값. RATIO는 1위 시청
+# 횟수 대비 비율(0.6 = 1위의 60% 이상이면 인정), MIN_COUNT는 그 항목을 최소
+# 몇 번은 봐야 "선호"로 인정할지(1~2번 우연히 본 건 제외)의 절대 하한이다.
 _PREFERENCE_RATIO_THRESHOLD = 0.6
 _PREFERENCE_MIN_COUNT = 2
 
@@ -128,6 +136,11 @@ def build_audience_profile(_db_audience, version=None):
             profile[c] = np.nan
 
     profile = profile.fillna({'활동세그먼트': '미분류'})
+    # 🌟 [취향 다각도 분석] 선호장르 등 4개 컬럼은 이제 "리스트"를 담으므로
+    # (위 _pref_list_by_customer 참고), 일반 fillna(스칼라 값)로는 빈 값을
+    # 못 채운다 - 왼쪽 조인에서 매칭이 안 돼 NaN으로 남은 고객은 빈 리스트로
+    # 명시적으로 바꿔줘야 이후 필터링/집계 코드가 "리스트"라고 안전하게 가정할
+    # 수 있다.
     for col in ['선호장르', '선호시청시간대', '선호채널', '선호메뉴']:
         if col in profile.columns:
             profile[col] = profile[col].apply(lambda v: v if isinstance(v, list) else [])
@@ -142,6 +155,10 @@ def summarize_profile_context(profile_df):
     gender_counts = profile_df['성별'].value_counts().to_dict() if '성별' in profile_df.columns else {}
     so_list = sorted(profile_df['시청자SO'].dropna().unique().tolist()) if '시청자SO' in profile_df.columns else []
 
+    # 🌟 [취향 다각도 분석] 선호장르 등은 이제 고객별로 "리스트"를 담는 컬럼이라
+    # (한 고객이 여러 값을 가질 수 있음) 그냥 .unique()를 부르면 "unhashable
+    # type: list" 에러가 난다. 먼저 explode()로 펼쳐서 개별 값 단위로 만든 뒤
+    # 유일값을 뽑아야 한다.
     def _flatten_unique(col):
         if col not in profile_df.columns:
             return []
@@ -225,7 +242,15 @@ def _as_list(val):
         return []
     if isinstance(val, (list, tuple, set)):
         return list(val)
+    # 🌟 [타겟 매칭 방어] AI가 여러 값을 배열이 아니라 "캠핑, 낚시"나 "캠핑 또는 낚시"처럼
+    # 사람이 읽는 문장 하나로 합쳐서 돌려주는 경우가 있다. 이 값을 그대로 [val]로 감싸면
+    # isin() 비교 시 데이터의 실제 장르 값과 그 문자열 전체가 완전히 똑같아야만 매칭되는데
+    # 그런 값은 실제 데이터에 없어서 전부 매칭 실패(0명에 가까움)로 이어진다. 그 결과
+    # 조건을 넓혔는데도 오히려 대상자가 줄어드는 것처럼 보이는 문제가 생길 수 있어서,
+    # 쉼표/슬래시/"또는"/"혹은"으로 구분된 문자열이면 여러 값으로 나눠서 인식하도록 방어한다.
     if isinstance(val, str):
+        # 🌟 콘텐츠명포함/채널명포함 필드에서 AI가 "캠핑|낚시"처럼 정규식 OR처럼
+        # 보이는 파이프로 여러 값을 표현하는 경우가 있어 구분자에 포함시킨다.
         parts = [p.strip() for p in re.split(r'[,/|]|또는|혹은', val) if p.strip()]
         return parts if parts else [val]
     return [val]
@@ -426,6 +451,11 @@ def summarize_segment_insight(profile_df, conditions, db_audience=None, top_n=3)
         return {'대상자수': 0, '전체시청자수': len(profile_df)}
 
     def _top(col):
+        # 🌟 [취향 다각도 분석] 선호장르/선호채널/선호메뉴는 이제 고객별로 여러 값을
+        # 담는 리스트 컬럼이다(_pref_list_by_customer). value_counts()는 리스트를
+        # 셀 수 없으므로(unhashable) 먼저 explode()로 펼친 뒤 세야 한다. 한 사람이
+        # 드라마/다큐를 둘 다 선호하면 두 항목 집계에 모두 1명씩 잡히는 게 맞다
+        # (다각도 취향을 그대로 반영 - 인원 합계가 대상자수보다 커질 수 있음).
         if col not in df.columns:
             return []
         s = df[col].dropna()
@@ -437,7 +467,7 @@ def summarize_segment_insight(profile_df, conditions, db_audience=None, top_n=3)
         if s.empty:
             return []
         return [f"{name}({int(cnt)}명)" for name, cnt in s.value_counts().head(top_n).items()]
-    
+
     def _mean(col, divide=1):
         if col not in df.columns or df.empty:
             return 0
@@ -487,6 +517,146 @@ def format_segment_insight_reply(insight):
 
     lines.append("이 조건으로 타겟을 잡아볼까요?")
     return " ".join(lines)
+
+
+def summarize_content_ranking(db_audience, profile_df=None, conditions=None, target='콘텐츠', order='인기', top_n=10):
+    """
+    🌟 [시청기록 자유 분석 - 콘텐츠/채널 순위] "요즘 가장 인기있는 콘텐츠 TOP10은?",
+    "가장 안 보는 채널이 뭐야?"처럼 순위를 묻는 질문에 답하기 위한 집계.
+    target='콘텐츠'면 '영상명', target='채널'이면 '채널명' 컬럼을 기준으로,
+    "몇 명이 봤는지"(시청자수=고유 고객 수) 기준으로 순위를 매긴다 - 단순 시청
+    "건수"가 아니라 "얼마나 많은 사람에게 닿았는지"가 인기를 더 정확히 나타낸다고
+    판단했다(재시청 많은 소수보다 널리 본 콘텐츠를 "인기"로 보는 게 자연스러움).
+    conditions가 있으면(예: "40대 여성이 가장 좋아하는") 먼저 그 조건에 맞는 고객
+    ID로 원본 시청이력을 좁힌 뒤 집계한다 - 이때도 profile_df 필터링과 완전히
+    동일한 _filter_by_conditions()를 그대로 재사용하므로, 조건 해석 방식이 타겟
+    설정과 달라질 일이 없다.
+    order='비인기'면 오름차순(적게 본 순)으로 뒤집는다 - 다만 이 데이터에 아예
+    한 번도 시청되지 않은 콘텐츠/채널은 원본 시청이력 자체에 기록이 없어서
+    순위에 잡힐 수 없다는 한계가 있다(그런 콘텐츠가 있는지는 이 함수로는 알 수 없음).
+    """
+    col_name = '영상명' if target == '콘텐츠' else '채널명'
+    if db_audience is None or db_audience.empty or col_name not in db_audience.columns:
+        return None
+
+    df = db_audience
+    matched_total = None
+    if conditions and profile_df is not None and not profile_df.empty:
+        matched = _filter_by_conditions(profile_df.copy(), conditions, db_audience)
+        matched_ids = set(matched['R고객번호'].astype(str).unique().tolist())
+        matched_total = len(matched_ids)
+        df = df[df['R고객번호'].astype(str).isin(matched_ids)]
+
+    if df.empty:
+        return {'대상': target, '기준': order, '기준인원수': matched_total, '항목': []}
+
+    grouped = df.groupby(col_name)['R고객번호'].nunique().reset_index(name='시청자수')
+    grouped = grouped.sort_values('시청자수', ascending=(order == '비인기'), kind='mergesort')
+    top = grouped.head(top_n)
+    return {
+        '대상': target,
+        '기준': order,
+        '기준인원수': matched_total,  # 조건으로 좁힌 경우 그 조건에 해당하는 고객 수 (참고용, 조건 없으면 None)
+        '항목': [{'이름': str(row[col_name]), '시청자수': int(row['시청자수'])} for _, row in top.iterrows()],
+    }
+
+
+def format_content_ranking_reply(ranking):
+    """summarize_content_ranking()의 계산 결과를 AI 호출 없이도 안전하게 문장으로
+    바꾸는 확정적 폴백 - AI 호출이 실패했을 때 에러 문구 대신 이걸 대화에 남긴다."""
+    if ranking is None:
+        return "죄송해요, 그 조건에 맞는 시청 데이터를 찾지 못했어요. 조건을 조금 다르게 다시 말씀해주시겠어요?"
+    items = ranking.get('항목') or []
+    if not items:
+        return "말씀하신 조건에 맞는 시청 기록을 찾지 못했어요. 조건을 조금 다르게 말씀해주시겠어요?"
+    label = ranking.get('대상') or '콘텐츠'
+    order_label = "비인기" if ranking.get('기준') == '비인기' else "인기"
+    joined = ', '.join(f"{it['이름']}({it['시청자수']}명)" for it in items)
+    return f"{order_label} {label} 순위는 {joined} 순이에요."
+
+
+# 🌟 [시청기록 자유 분석 - 그룹 현황/비교] "SO별로 시청자 수 비교해줘", "나이대별
+# 분포가 어때?"는 사실 같은 계산이다 - 어떤 기준으로 사람을 나눠서 그룹별 인원/비중을
+# 보는 것. 그룹핑 가능한 필드를 여기서 명시적으로 정해두고(임의 컬럼명을 그대로
+# 받으면 존재하지 않는 컬럼 요청 등으로 깨지기 쉬움), '나이대'처럼 실제 컬럼이 아닌
+# 계산이 필요한 필드는 별도 처리한다.
+_GROUPABLE_FIELD_COLUMNS = {
+    '성별': '성별', 'SO': '시청자SO', '활동세그먼트': '활동세그먼트',
+    '선호장르': '선호장르', '선호채널': '선호채널', '선호메뉴': '선호메뉴',
+    '선호시청시간대': '선호시청시간대',
+}
+
+
+def _groupable_series(df, group_field):
+    """group_field 이름으로 그룹핑에 쓸 Series를 만든다. '나이대'는 profile_df에
+    실제 컬럼이 없고 '나이'에서 계산해야 하므로, _filter_by_conditions()의 나이대
+    계산식과 완전히 동일한 방식을 재사용한다(다른 곳과 구간 정의가 어긋나면 실무자가
+    혼란스러움). 나이 값이 없는 행은 "<NA>대" 같은 이상한 문자열이 되지 않도록
+    명시적으로 NaN으로 남겨서, 호출부의 notna() 필터에 자연스럽게 걸러지게 한다."""
+    if group_field == '나이대':
+        if '나이' not in df.columns:
+            return None
+        age_num = pd.to_numeric(df['나이'], errors='coerce')
+        band = (age_num // 10 * 10).astype('Int64').astype(str) + '대'
+        return band.where(age_num.notna())
+    col = _GROUPABLE_FIELD_COLUMNS.get(group_field)
+    if col is None or col not in df.columns:
+        return None
+    return df[col]
+
+
+def summarize_group_breakdown(profile_df, group_field, conditions=None, db_audience=None, top_n=10):
+    """
+    🌟 [시청기록 자유 분석 - 그룹 현황/비교] group_field 기준으로 고객을 나눠
+    그룹별 인원수/비중을 계산한다. conditions가 있으면(예: "40대 중에서 성별
+    비율은?") 먼저 그 조건으로 좁힌 뒤 그룹핑한다.
+    선호장르 등은 고객별로 여러 값을 담는 리스트 컬럼이라(취향 다각도 분석)
+    explode해서 집계하므로, 한 사람이 여러 그룹에 동시에 잡힐 수 있다 - 이 경우
+    그룹별 인원 합계가 전체인원수보다 커질 수 있음을 감안해야 한다(취향 다각도
+    분석과 동일한 원칙: 그 사람이 실제로 그 그룹들 모두에 해당하는 게 맞기 때문).
+    """
+    if profile_df is None or profile_df.empty or not group_field:
+        return None
+
+    df = profile_df
+    if conditions:
+        df = _filter_by_conditions(df.copy(), conditions, db_audience)
+    if df.empty:
+        return {'기준필드': group_field, '전체인원수': 0, '그룹': []}
+
+    keys = _groupable_series(df, group_field)
+    if keys is None:
+        return None
+
+    work = df.assign(__group=keys.values)
+    is_list_valued = len(work) > 0 and isinstance(work['__group'].iloc[0], list)
+    if is_list_valued:
+        work = work.explode('__group')
+    work = work[work['__group'].notna() & (work['__group'].astype(str).str.strip() != '')]
+    total = len(df)  # explode로 행이 늘어날 수 있으니 분모는 원래(중복 제거 전) 대상자 수로 고정
+    if work.empty:
+        return {'기준필드': group_field, '전체인원수': total, '그룹': []}
+
+    counts = work.groupby('__group')['R고객번호'].nunique().sort_values(ascending=False)
+    groups = [
+        {'그룹값': str(name), '인원수': int(cnt), '비중': round(cnt / total * 100, 1) if total else 0}
+        for name, cnt in counts.head(top_n).items()
+    ]
+    return {'기준필드': group_field, '전체인원수': total, '그룹': groups}
+
+
+def format_group_breakdown_reply(breakdown):
+    """summarize_group_breakdown()의 계산 결과를 AI 호출 없이도 안전하게 문장으로
+    바꾸는 확정적 폴백."""
+    if breakdown is None:
+        return "죄송해요, 그 기준으로는 데이터를 나눠보기 어려웠어요. 다른 기준으로 다시 말씀해주시겠어요?"
+    groups = breakdown.get('그룹') or []
+    if not groups:
+        return "말씀하신 조건/기준에 맞는 데이터를 찾지 못했어요. 조건을 조금 다르게 말씀해주시겠어요?"
+    parts = ', '.join(f"{g['그룹값']} {g['인원수']}명({g['비중']}%)" for g in groups)
+    total = breakdown.get('전체인원수', 0)
+    field_label = breakdown.get('기준필드', '')
+    return f"전체 {total:,}명 기준으로 {field_label}별로는 {parts} 순이에요."
 
 
 def apply_target_conditions(profile_df, conditions, db_audience=None):

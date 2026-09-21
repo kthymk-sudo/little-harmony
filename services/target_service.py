@@ -8,6 +8,8 @@ import json
 from ai_engine.gemini_api import generate_target_chat_reply, generate_segment_insight_reply, is_api_error
 from database.db_manager import (
     summarize_profile_context, summarize_segment_insight, format_segment_insight_reply,
+    summarize_content_ranking, format_content_ranking_reply,
+    summarize_group_breakdown, format_group_breakdown_reply,
     _normalize_field_name,
 )
 from utils.response_parser import parse_target_conditions
@@ -54,6 +56,12 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
     # 값이다. 아래 조건 병합 루프에 절대 섞이면 안 되므로(섞이면 질문 한 번에 확정
     # 타겟이 의도치 않게 바뀐다) 먼저 따로 떼어낸다.
     question_conditions = parsed_conditions.pop('질문조건', None)
+
+    # 🌟 [시청기록 자유 분석] "가장 인기있는 콘텐츠는?"(콘텐츠채널순위질문), "성별로 분포가
+    # 어때?"(그룹현황질문)도 "질문조건"과 완전히 같은 이유로 - 확정 타겟과 섞이면 안 되고
+    # 매 턴 새로 판단되는 1회성 값이므로 - 병합 루프 전에 따로 떼어낸다.
+    content_ranking_question = parsed_conditions.pop('콘텐츠채널순위질문', None)
+    group_breakdown_question = parsed_conditions.pop('그룹현황질문', None)
 
     # 🌟 [조건 삭제 지원] "나이 조건 빼줘"처럼 실무자가 명확히 삭제를 요청하면, AI가
     # 해당 필드명을 이 리스트에 담아 내려준다. 아래 빈 값 스킵 병합 로직과는 별개로,
@@ -107,6 +115,47 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
             reply_text = fallback_reply if is_api_error(ai_insight_reply) else ai_insight_reply
         else:
             reply_text = fallback_reply
-            
+
+    # 🌟 [시청기록 자유 분석] "질문조건"과 같은 패턴: 실제 계산은 database.audience의
+    # 결정론적 집계 함수(summarize_content_ranking/summarize_group_breakdown)가 하고,
+    # AI는 그 결과를 자연스러운 문장으로 바꾸는 역할만 한다(is_api_error 시 고정
+    # 템플릿으로 폴백). AI가 순위/숫자를 직접 지어내는 경로는 없다.
+    elif isinstance(content_ranking_question, dict) and content_ranking_question.get('대상') and content_ranking_question.get('기준'):
+        ranking = summarize_content_ranking(
+            db_audience,
+            profile_df=profile_df,
+            conditions=content_ranking_question.get('필터조건') or None,
+            target=content_ranking_question.get('대상'),
+            order=content_ranking_question.get('기준'),
+        )
+        fallback_reply = format_content_ranking_reply(ranking)
+        if ranking and ranking.get('항목'):
+            ai_ranking_reply = generate_segment_insight_reply(
+                user_text,
+                json.dumps(content_ranking_question, ensure_ascii=False),
+                json.dumps(ranking, ensure_ascii=False),
+            )
+            reply_text = fallback_reply if is_api_error(ai_ranking_reply) else ai_ranking_reply
+        else:
+            reply_text = fallback_reply
+
+    elif isinstance(group_breakdown_question, dict) and group_breakdown_question.get('기준필드'):
+        breakdown = summarize_group_breakdown(
+            profile_df,
+            group_breakdown_question.get('기준필드'),
+            conditions=group_breakdown_question.get('필터조건') or None,
+            db_audience=db_audience,
+        )
+        fallback_reply = format_group_breakdown_reply(breakdown)
+        if breakdown and breakdown.get('그룹'):
+            ai_breakdown_reply = generate_segment_insight_reply(
+                user_text,
+                json.dumps(group_breakdown_question, ensure_ascii=False),
+                json.dumps(breakdown, ensure_ascii=False),
+            )
+            reply_text = fallback_reply if is_api_error(ai_breakdown_reply) else ai_breakdown_reply
+        else:
+            reply_text = fallback_reply
+
     new_messages = history_with_user + [{"role": "assistant", "text": reply_text}]
     return new_messages, merged_conditions
