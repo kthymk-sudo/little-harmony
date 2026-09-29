@@ -1,10 +1,54 @@
 # ui/sidebar.py
 import datetime
 import streamlit as st
-from config import start_new_conversation, load_conversation_into_session
+from config import (
+    start_new_conversation, load_conversation_into_session,
+    start_new_analysis_conversation, load_analysis_conversation_into_session,
+    start_new_report_conversation, load_report_conversation_into_session,
+)
 from database.db_manager import list_conversations, load_conversation, delete_conversation, rename_conversation
 from database.db_manager import get_loaded_periods
 from ui.upload_panel import render_upload_panel
+
+_FEATURES = [
+    ("targeting", "🎯 타겟팅&카피"),
+    ("analysis", "📊 분석"),
+    ("report", "📝 보고서"),
+]
+
+# 🌟 [모듈화] 기능이 2개일 때는 if/else 하나로 충분했지만, 3개가 되면서
+# 매 분기마다 if/elif가 늘어지는 대신 기능별 동작(새 대화 시작/불러오기/
+# 세션의 현재 대화 id 키/기본 제목)을 표로 묶어 한 곳에서 관리한다.
+_FEATURE_HANDLERS = {
+    "targeting": {
+        "start_new": start_new_conversation,
+        "load": load_conversation_into_session,
+        "conv_id_key": "current_conversation_id",
+        "default_title": "새 타겟 대화",
+    },
+    "analysis": {
+        "start_new": start_new_analysis_conversation,
+        "load": load_analysis_conversation_into_session,
+        "conv_id_key": "analysis_current_conversation_id",
+        "default_title": "새 분석 대화",
+    },
+    "report": {
+        "start_new": start_new_report_conversation,
+        "load": load_report_conversation_into_session,
+        "conv_id_key": "report_current_conversation_id",
+        "default_title": "새 보고서 대화",
+    },
+}
+
+
+def _render_feature_switcher():
+    """세로 기능 메뉴. 선택된 기능에 따라 메인 화면과 아래 대화 목록이 통째로 바뀐다."""
+    for feature_key, label in _FEATURES:
+        is_active = (st.session_state.active_feature == feature_key)
+        if st.button(label, key=f"feature_{feature_key}", width='stretch', type="primary" if is_active else "secondary"):
+            if not is_active:
+                st.session_state.active_feature = feature_key
+                st.rerun()
 
 
 def render_sidebar():
@@ -19,19 +63,25 @@ def render_sidebar():
             unsafe_allow_html=True
         )
 
+        _render_feature_switcher()
+        handler = _FEATURE_HANDLERS[st.session_state.active_feature]
+
+        st.divider()
+
         if st.button("＋ 새 대화", width='stretch', type="primary"):
-            start_new_conversation()
+            handler["start_new"]()
             st.rerun()
 
         st.divider()
         st.caption("대화 기록")
 
-        conv_list = list_conversations()
+        conv_list = list_conversations(feature=st.session_state.active_feature)
+        active_conv_id = st.session_state[handler["conv_id_key"]]
         if conv_list.empty:
             st.caption("아직 저장된 대화가 없습니다.")
         else:
             for _, row in conv_list.iterrows():
-                is_active = (row['id'] == st.session_state.current_conversation_id)
+                is_active = (row['id'] == active_conv_id)
 
                 if st.session_state.get('renaming_conv_id') == row['id']:
                     with st.form(key=f"rename_form_{row['id']}", border=False):
@@ -45,7 +95,7 @@ def render_sidebar():
                         with col_cancel:
                             cancel_clicked = st.form_submit_button("취소", width='stretch')
                     if save_clicked:
-                        final_title = new_title.strip() or row['title'] or "새 타겟 대화"
+                        final_title = new_title.strip() or row['title'] or handler["default_title"]
                         rename_conversation(row['id'], final_title)
                         st.session_state.pop('renaming_conv_id', None)
                         st.rerun()
@@ -56,12 +106,12 @@ def render_sidebar():
 
                 col_title, col_rename, col_delete = st.columns([4, 1, 1])
                 with col_title:
-                    label = ("🟢 " if is_active else "") + (row['title'] or "새 타겟 대화")
+                    label = ("🟢 " if is_active else "") + (row['title'] or handler["default_title"])
                     if st.button(label, key=f"conv_{row['id']}", width='stretch'):
                         if not is_active:
                             detail = load_conversation(row['id'])
                             if detail:
-                                load_conversation_into_session(detail)
+                                handler["load"](detail)
                                 st.rerun()
                 with col_rename:
                     if st.button("✏️", key=f"rename_{row['id']}"):
@@ -72,7 +122,7 @@ def render_sidebar():
                         was_active = is_active
                         delete_conversation(row['id'])
                         if was_active:
-                            start_new_conversation()
+                            handler["start_new"]()
                         st.rerun()
 
         st.divider()

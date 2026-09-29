@@ -5,6 +5,8 @@ import streamlit as st
 from config import GEMINI_API_KEY
 from prompts.target_chat_prompt import get_target_chat_prompt, get_target_reasoning_prompt, get_segment_insight_prompt
 from prompts.push_prompt import get_push_prompt, get_sms_prompt
+from prompts.analysis_chat_prompt import get_analysis_chat_prompt
+from prompts.report_prompt import get_report_prompt
 
 _http_session = requests.Session()
 
@@ -227,3 +229,13 @@ def get_current_model_label():
 def generate_segment_insight_reply(question_str, conditions_str, insight_stats_str):
     prompt = get_segment_insight_prompt(question_str, conditions_str, insight_stats_str)
     return _call_gemini_api(prompt, temperature=0.4)
+
+def generate_analysis_chat_reply(chat_history, profile_context_str):
+    chat_history_str = _format_chat_history(chat_history)
+    prompt = get_analysis_chat_prompt(chat_history_str, profile_context_str)
+    return _call_gemini_api(prompt, temperature=0.3)
+
+def generate_report_reply(chat_history, profile_context_str):
+    chat_history_str = _format_chat_history(chat_history)
+    prompt = get_report_prompt(chat_history_str, profile_context_str)
+    return _call_gemini_api(prompt, temperature=0.5)

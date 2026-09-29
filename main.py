@@ -21,6 +21,8 @@ from database.db_manager import (
 )
 from ui.sidebar import render_sidebar
 from ui.chat_app import render_chat_app
+from ui.analysis_chat import render_analysis_chat
+from ui.report_chat import render_report_chat
 
 st.set_page_config(page_title="레T-고객 타겟팅&카소 자동화", layout="wide")
 init_session_state()
@@ -55,4 +57,9 @@ db_audience = build_audience_db(df_history, df_employee, version=period_version)
 db_audience = filter_by_period(db_audience, period_start, period_end)
 profile_df = build_audience_profile(db_audience, version=period_version)
 
-render_chat_app(profile_df, db_audience)
+if st.session_state.active_feature == 'analysis':
+    render_analysis_chat(profile_df, db_audience)
+elif st.session_state.active_feature == 'report':
+    render_report_chat(profile_df, db_audience)
+else:
+    render_chat_app(profile_df, db_audience)

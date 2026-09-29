@@ -65,11 +65,42 @@ def _fresh_conversation_state():
     }
 
 
+def _fresh_simple_chat_state(prefix):
+    """📊 분석 / 📝 보고서처럼 phase 상태머신이 없는 단순 챗 탭 하나의 초기 상태.
+    타겟팅 탭과 세션 상태를 완전히 분리해서 사이드바 세로 메뉴로 탭을 오가도
+    서로 상태가 섞이지 않게 한다. 두 탭이 필요로 하는 상태 모양이 완전히
+    같아서(메시지 목록 + 타이핑 애니메이션 플래그) prefix만 다르게 재사용한다."""
+    from database.db_manager import new_conversation_id
+    return {
+        f'{prefix}_current_conversation_id': new_conversation_id(),
+        f'{prefix}_messages': [],           # [{"role": ..., "text": ..., "chart": {...}(선택)}]
+        f'{prefix}_greet_stream_pending': True,
+        f'{prefix}_pending_user_text': None,
+        f'{prefix}_stream_next': False,
+    }
+
+
+def _fresh_analysis_state():
+    return _fresh_simple_chat_state('analysis')
+
+
+def _fresh_report_state():
+    return _fresh_simple_chat_state('report')
+
+
 def init_session_state():
     """Streamlit 세션 상태 초기화 (앱 최초 진입 시 1회)."""
     if 'current_conversation_id' not in st.session_state:
         for k, v in _fresh_conversation_state().items():
             st.session_state[k] = v
+    if 'analysis_current_conversation_id' not in st.session_state:
+        for k, v in _fresh_analysis_state().items():
+            st.session_state[k] = v
+    if 'report_current_conversation_id' not in st.session_state:
+        for k, v in _fresh_report_state().items():
+            st.session_state[k] = v
+    if 'active_feature' not in st.session_state:
+        st.session_state.active_feature = 'targeting'  # 'targeting' | 'analysis' | 'report'
     # 🌟 [시청기간 설정] 대화 상태와 별개로 세션 전체에서 유지되는 데이터 범위 설정.
     # '새 대화'를 시작해도 초기화되지 않도록 _fresh_conversation_state()가 아닌
     # 별도 블록에서 최초 1회만 기본값을 넣는다.
@@ -83,6 +114,34 @@ def start_new_conversation():
     """사이드바 '+ 새 대화'에서 호출 - 현재 세션을 완전히 새 대화 상태로 초기화."""
     for k, v in _fresh_conversation_state().items():
         st.session_state[k] = v
+
+
+def start_new_analysis_conversation():
+    """사이드바 '+ 새 대화'(📊 분석 탭)에서 호출."""
+    for k, v in _fresh_analysis_state().items():
+        st.session_state[k] = v
+
+
+def load_analysis_conversation_into_session(conv_state):
+    """DB에서 불러온 분석 대화 상태(dict)를 세션에 그대로 반영."""
+    st.session_state.analysis_current_conversation_id = conv_state['id']
+    st.session_state.analysis_messages = conv_state['messages']
+    st.session_state.analysis_greet_stream_pending = False
+    st.session_state.analysis_stream_next = False
+
+
+def start_new_report_conversation():
+    """사이드바 '+ 새 대화'(📝 보고서 탭)에서 호출."""
+    for k, v in _fresh_report_state().items():
+        st.session_state[k] = v
+
+
+def load_report_conversation_into_session(conv_state):
+    """DB에서 불러온 보고서 대화 상태(dict)를 세션에 그대로 반영."""
+    st.session_state.report_current_conversation_id = conv_state['id']
+    st.session_state.report_messages = conv_state['messages']
+    st.session_state.report_greet_stream_pending = False
+    st.session_state.report_stream_next = False
 
 
 def load_conversation_into_session(conv_state):

@@ -25,27 +25,33 @@ def _ensure_conversation_table(cursor):
             member_ids_json TEXT,
             reasoning TEXT,
             push_copy TEXT,
-            title_custom INTEGER DEFAULT 0
+            title_custom INTEGER DEFAULT 0,
+            feature TEXT DEFAULT 'targeting'
         )
     """)
     cursor.execute("PRAGMA table_info(tb_conversation)")
     existing_cols = [info[1] for info in cursor.fetchall()]
     if 'title_custom' not in existing_cols:
         cursor.execute("ALTER TABLE tb_conversation ADD COLUMN title_custom INTEGER DEFAULT 0")
+    if 'feature' not in existing_cols:
+        cursor.execute("ALTER TABLE tb_conversation ADD COLUMN feature TEXT DEFAULT 'targeting'")
 
 
 def new_conversation_id():
     return str(uuid.uuid4())
 
 
-def make_conversation_title(first_user_text):
+_DEFAULT_TITLES = {'analysis': "새 분석 대화", 'report': "새 보고서 대화"}
+
+
+def make_conversation_title(first_user_text, feature='targeting'):
     if not first_user_text:
-        return "새 타겟 대화"
+        return _DEFAULT_TITLES.get(feature, "새 타겟 대화")
     text = first_user_text.strip().replace("\n", " ")
     return text[:24] + ("…" if len(text) > 24 else "")
 
 
-def save_conversation(conv_id, title, phase, messages, conditions, stats, member_ids, reasoning, push_copy):
+def save_conversation(conv_id, title, phase, messages, conditions, stats, member_ids, reasoning, push_copy, feature='targeting'):
     try:
         conn = _connect()
         cursor = conn.cursor()
@@ -62,15 +68,15 @@ def save_conversation(conv_id, title, phase, messages, conditions, stats, member
 
         cursor.execute(
             """INSERT OR REPLACE INTO tb_conversation
-               (id, title, created_at, updated_at, phase, messages_json, conditions_json, stats_json, member_ids_json, reasoning, push_copy, title_custom)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, title, created_at, updated_at, phase, messages_json, conditions_json, stats_json, member_ids_json, reasoning, push_copy, title_custom, feature)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 conv_id, final_title, created_at, now, phase,
                 json.dumps(messages or [], ensure_ascii=False),
                 json.dumps(conditions or {}, ensure_ascii=False),
                 json.dumps(stats or {}, ensure_ascii=False),
                 json.dumps(list(member_ids or []), ensure_ascii=False),
-                reasoning or "", push_copy or "", title_custom,
+                reasoning or "", push_copy or "", title_custom, feature,
             ),
         )
         conn.commit()
@@ -91,13 +97,19 @@ def rename_conversation(conv_id, new_title):
         pass
 
 
-def list_conversations():
+def list_conversations(feature=None):
     try:
         conn = _connect()
         cursor = conn.cursor()
         _ensure_conversation_table(cursor)
         conn.commit()
-        df = pd.read_sql("SELECT id, title, updated_at FROM tb_conversation ORDER BY updated_at DESC", conn)
+        if feature:
+            df = pd.read_sql(
+                "SELECT id, title, updated_at FROM tb_conversation WHERE feature = ? ORDER BY updated_at DESC",
+                conn, params=(feature,),
+            )
+        else:
+            df = pd.read_sql("SELECT id, title, updated_at FROM tb_conversation ORDER BY updated_at DESC", conn)
         conn.close()
         return df
     except Exception:
@@ -122,6 +134,7 @@ def load_conversation(conv_id):
             'member_ids': json.loads(row['member_ids_json']) if row['member_ids_json'] else [],
             'reasoning': row['reasoning'] or "",
             'push_copy': row['push_copy'] or "",
+            'feature': (row['feature'] if 'feature' in row and row['feature'] else 'targeting'),
         }
     except Exception:
         return None
