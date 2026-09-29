@@ -82,6 +82,63 @@ _CHAT_CSS = """
     border-color: #E3E8F2;
 }
 
+/* ---------- 사이드바: 로고 + 시스템 이름 ---------- */
+[class*="st-key-hp-logo"] {
+    margin-top: 0.3rem;
+}
+.hp-system-name {
+    text-align: center;
+    font-size: 1.05rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    color: #1B2333;
+    margin: 0.4rem 0 1.2rem 0;
+}
+
+/* ---------- 사이드바: 기능 메뉴(내비게이션) ----------
+   평소엔 배경 없는 목록, 마우스를 올리면 옅은 파랑, 현재 메뉴는 옅은 파랑 배경 + 왼쪽 강조선.
+   (현재 메뉴 = type="primary" 버튼. "새 대화"의 진한 파랑과 겹치지 않게 옅은 톤으로) */
+[class*="st-key-hp-nav"] {
+    gap: 0.2rem;
+}
+[class*="st-key-hp-nav"] button {
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    border-radius: 10px;
+    padding: 0.55rem 0.85rem;
+    color: #475569 !important;
+}
+[class*="st-key-hp-nav"] button > div {
+    justify-content: flex-start;  /* 스트림릿 버튼은 안쪽 내용이 가운데 정렬이라, 목록처럼 왼쪽으로 */
+}
+[class*="st-key-hp-nav"] button > div > span {
+    gap: 0.6rem;
+}
+[class*="st-key-hp-nav"] button p {
+    font-size: 0.93rem;
+    font-weight: 600;
+}
+[class*="st-key-hp-nav"] button:hover {
+    background: #F1F5FF !important;
+    color: #1D4ED8 !important;
+}
+[class*="st-key-hp-nav"] [data-testid="stBaseButton-primary"] {
+    background: #EAF1FF !important;
+    color: #1D4ED8 !important;
+    box-shadow: inset 3px 0 0 #2563EB !important;
+}
+[class*="st-key-hp-nav"] [data-testid="stBaseButton-primary"] p {
+    font-weight: 800;
+}
+[class*="st-key-hp-new-chat"] button {
+    justify-content: center;
+    border-radius: 10px;
+}
+[class*="st-key-hp-new-chat"] button p {
+    font-weight: 700;
+}
+
 /* ---------- 대화 액션 카드(안내문/조건 요약) ---------- */
 [data-testid="stAlert"] {
     border-radius: 14px;
@@ -129,6 +186,35 @@ _CHAT_CSS = """
 }
 [data-testid="stBaseButton-primary"] {
     box-shadow: 0 2px 10px rgba(37, 99, 235, 0.25);
+}
+
+/* ---------- 답변 아래 액션 버튼(그래프로 보기 / 전체와 비교 피드백) ----------
+   말풍선에 붙은 보조 액션이라 크기는 작게, 말풍선과 같은 톤의 알약 모양으로. */
+[class*="st-key-hp-actions"] {
+    margin: -0.35rem 0 0.5rem 0.2rem;
+}
+[class*="st-key-hp-actions"] button {
+    min-height: 0;
+    padding: 0.28rem 0.85rem;
+    border-radius: 999px;
+    border: 1px solid #DCE3F0;
+    background: #FFFFFF;
+    color: #334155;
+    box-shadow: 0 1px 2px rgba(21, 33, 66, 0.06);
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+[class*="st-key-hp-actions"] button p {
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+[class*="st-key-hp-actions"] button:hover {
+    background: #EEF2FF;
+    border-color: #2563EB;
+    color: #1D4ED8;
+}
+[class*="st-key-hp-actions"] button:focus:not(:active) {
+    border-color: #2563EB;
+    color: #1D4ED8;
 }
 
 /* ---------- 채팅 입력창 ---------- */

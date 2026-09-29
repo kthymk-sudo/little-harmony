@@ -44,6 +44,23 @@ def _render_steps(steps, checks):
                 st.caption(f"· {c}")
 
 
+def _render_actions(i, turn):
+    """답변 말풍선 바로 아래의 알약 모양 액션 버튼 줄(그래프 보기/접기, 전체와 비교 피드백).
+    그래프와 피드백은 실무자가 원할 때만 만든다. 모양은 ui/chat_styles.py의 hp-actions 스타일."""
+    with st.container(horizontal=True, gap="small", key=f"hp-actions-{i}"):
+        showing = bool(turn.get("chart"))
+        if st.button("그래프 접기" if showing else "그래프로 보기", width="content", key=f"analysis_to_chart_{i}",
+                     icon=":material/expand_less:" if showing else ":material/bar_chart:"):
+            if showing:
+                turn.pop("chart")
+            else:
+                turn["chart"] = chart_spec_from(turn["data"])  # AI 재호출 없음
+            _autosave()
+            st.rerun()
+        if st.button("전체와 비교 피드백", width="content", key=f"analysis_feedback_{i}", icon=":material/insights:"):
+            _ask(FEEDBACK_REQUEST_TEXT, feedback=True)
+
+
 def _ask(user_text, feedback=False):
     st.session_state.analysis_messages.append({"role": "user", "text": user_text})
     st.session_state.analysis_pending_user_text = user_text
@@ -71,8 +88,8 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
         render_message(turn["role"], turn["text"], animate=should_animate)
         if should_animate:
             st.session_state.analysis_stream_next = False
-        if turn.get("steps") or turn.get("checks"):
-            _render_steps(turn.get("steps") or [], turn.get("checks") or [])
+        if turn.get("data"):
+            _render_actions(i, turn)
         chart_spec = turn.get("chart")
         try:
             fig = build_pivot_chart_figure(chart_spec)
@@ -85,15 +102,8 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
             if table_df is not None:
                 with st.expander("표로 보기"):
                     st.dataframe(table_df, width='stretch')
-        if turn.get("data"):
-            # 그래프와 전체 비교 피드백은 실무자가 원할 때만 만든다
-            chart_col, feedback_col, _ = st.columns([1, 1.4, 3])
-            if fig is None and chart_col.button("📊 그래프로 보기", key=f"analysis_to_chart_{i}"):
-                turn["chart"] = chart_spec_from(turn["data"])  # AI 재호출 없음
-                _autosave()
-                st.rerun()
-            if feedback_col.button("🔍 전체와 비교 피드백", key=f"analysis_feedback_{i}"):
-                _ask(FEEDBACK_REQUEST_TEXT, feedback=True)
+        if turn.get("steps") or turn.get("checks"):
+            _render_steps(turn.get("steps") or [], turn.get("checks") or [])
 
     if st.session_state.get('analysis_pending_user_text'):
         pending = st.session_state.pop('analysis_pending_user_text')

@@ -21,14 +21,16 @@ from config import init_session_state
 from database.db_manager import (
     load_history_period, load_content, has_history_data, build_audience_profile, get_data_version,
 )
-from ui.sidebar import render_sidebar
+from ui.sidebar import render_sidebar, SYSTEM_NAME
 from ui.chat_app import render_chat_app
 from ui.analysis_chat import render_analysis_chat
 from ui.report_chat import render_report_chat
+from ui.chat_styles import inject_chat_css
 
-st.set_page_config(page_title="레T-고객 타겟팅&카소 자동화", layout="wide")
+st.set_page_config(page_title=SYSTEM_NAME, layout="wide")
 init_session_state()
 
+inject_chat_css()  # 사이드바 스타일은 데이터가 없는 안내 화면에서도 적용돼야 해서 여기서 한 번
 render_sidebar()
 
 # 대화 저장이 실패했으면(ui/*의 autosave가 표시) 한 번 알려준다 - 저장 직후 rerun되므로 여기서 띄운다
@@ -38,7 +40,7 @@ if st.session_state.pop('save_failed', False):
 # 🌟 [속도 최적화] 데이터 존재 여부만 확인하는 가벼운 쿼리로 안내 화면을 먼저 분기한다
 # (데이터가 아무리 많이 쌓여 있어도 이 확인 자체는 항상 즉시 끝난다).
 if not has_history_data():
-    st.title("레T-고객 타겟팅&카소 자동화")
+    st.title(SYSTEM_NAME)
     st.warning("아직 적재된 시청 데이터가 없습니다. 왼쪽 사이드바의 '📂 데이터 업로드'에서 파일을 올려주세요.")
     st.stop()
 

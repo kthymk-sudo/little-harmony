@@ -9,10 +9,13 @@ from database.db_manager import list_conversations, load_conversation, delete_co
 from database.db_manager import get_loaded_periods
 from ui.upload_panel import render_upload_panel
 
+SYSTEM_NAME = "레T DB 기반 종합 시스템"
+
+# (기능 키, 메뉴 이름, 아이콘) - 아이콘은 스트림릿 Material 아이콘
 _FEATURES = [
-    ("targeting", "🎯 타겟팅&카피"),
-    ("analysis", "📊 분석"),
-    ("report", "📝 보고서"),
+    ("targeting", "타겟팅 & 카피", ":material/campaign:"),
+    ("analysis", "데이터 분석", ":material/analytics:"),
+    ("report", "보고서", ":material/description:"),
 ]
 
 # 🌟 [모듈화] 기능이 2개일 때는 if/else 하나로 충분했지만, 3개가 되면서
@@ -41,35 +44,34 @@ _FEATURE_HANDLERS = {
 
 
 def _render_feature_switcher():
-    """세로 기능 메뉴. 선택된 기능에 따라 메인 화면과 아래 대화 목록이 통째로 바뀐다."""
-    for feature_key, label in _FEATURES:
-        is_active = (st.session_state.active_feature == feature_key)
-        if st.button(label, key=f"feature_{feature_key}", width='stretch', type="primary" if is_active else "secondary"):
-            if not is_active:
-                st.session_state.active_feature = feature_key
-                st.rerun()
+    """세로 기능 메뉴. 선택된 기능에 따라 메인 화면과 아래 대화 목록이 통째로 바뀐다.
+    모양은 ui/chat_styles.py의 hp-nav 스타일(현재 메뉴는 옅은 파랑 배경 + 왼쪽 강조선)."""
+    with st.container(key="hp-nav"):
+        for feature_key, label, icon in _FEATURES:
+            is_active = (st.session_state.active_feature == feature_key)
+            if st.button(label, key=f"feature_{feature_key}", icon=icon, width='stretch',
+                         type="primary" if is_active else "secondary"):
+                if not is_active:
+                    st.session_state.active_feature = feature_key
+                    st.rerun()
 
 
 def render_sidebar():
     with st.sidebar:
-        # 🌟 로고를 사이드바 전체 폭에 꽉 차게 맨 위에 배치합니다.
-        st.image("logo.png", use_container_width=True)
-
-        # 🌟 [UI 개선] 'text-align: center;'를 추가하여 타이틀을 로고의 중앙에 예쁘게 정렬합니다.
-        st.markdown(
-            "<h3 style='text-align: center; margin-top: 10px; margin-bottom: 15px; font-size: 1.5rem; letter-spacing: -0.02em; font-weight: bold;'>"
-            "고객 타겟팅&카소 자동화</h3>",
-            unsafe_allow_html=True
-        )
+        # 🌟 [UI 개선] 로고는 사이드바를 꽉 채우지 않게 작게, 가운데 정렬
+        with st.container(horizontal_alignment="center", key="hp-logo"):
+            st.image("logo.png", width=150)
+        st.markdown(f"<div class='hp-system-name'>{SYSTEM_NAME}</div>", unsafe_allow_html=True)
 
         _render_feature_switcher()
         handler = _FEATURE_HANDLERS[st.session_state.active_feature]
 
         st.divider()
 
-        if st.button("＋ 새 대화", width='stretch', type="primary"):
-            handler["start_new"]()
-            st.rerun()
+        with st.container(key="hp-new-chat"):
+            if st.button("새 대화", icon=":material/add:", width='stretch', type="primary"):
+                handler["start_new"]()
+                st.rerun()
 
         st.divider()
         st.caption("대화 기록")
