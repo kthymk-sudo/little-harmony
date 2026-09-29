@@ -2,10 +2,9 @@
 # ============================================================
 # 🌟 [모듈화] database/db_manager.py에서 "캐시된 데이터 로딩" 관련 함수만 분리.
 # ============================================================
-import glob
 import pandas as pd
 import streamlit as st
-from database.connection import _connect, get_data_version
+from database.connection import _connect, get_data_version, history_db_files
 
 
 @st.cache_data(show_spinner=False, persist="disk", max_entries=5)
@@ -18,7 +17,7 @@ def _load_from_db_cached(version):
     finally:
         conn_main.close()
 
-    history_files = glob.glob("harmony_history_*.db")
+    history_files = history_db_files()
     df_list = []
 
     for db_file in history_files:
@@ -68,7 +67,7 @@ def optimize_db(conn=None):
 
 
 def has_history_data():
-    history_files = glob.glob("harmony_history_*.db")
+    history_files = history_db_files()
     if not history_files:
         return False
 
@@ -101,6 +100,22 @@ def load_employee_list():
     return _load_employee_cached(get_data_version())
 
 
+@st.cache_data(show_spinner=False, persist="disk", max_entries=5)
+def _load_content_cached(version):
+    conn = _connect()
+    try:
+        return pd.read_sql("SELECT * FROM tb_content", conn)
+    except Exception:
+        return pd.DataFrame(columns=['콘텐츠ID'])
+    finally:
+        conn.close()
+
+
+def load_content():
+    """콘텐츠별 누적 통계(tb_content). 기간 필터 대상이 아니다 - 파일 추출 시점까지의 누적값."""
+    return _load_content_cached(get_data_version())
+
+
 _HISTORY_FALLBACK_COLS = ['콘텐츠ID', 'R고객번호', '이웃고객명', '성별', '나이', '시청자SO',
                           '채널명', '메뉴명', '장르', '영상명', '러닝타임', '시청시간',
                           '시청일', '시청시간대', '시청 유지율']
@@ -108,7 +123,7 @@ _HISTORY_FALLBACK_COLS = ['콘텐츠ID', 'R고객번호', '이웃고객명', '�
 
 @st.cache_data(show_spinner=False, persist="disk", max_entries=30)
 def _load_history_period_cached(version, start_date, end_date):
-    history_files = glob.glob("harmony_history_*.db")
+    history_files = history_db_files()
     df_list = []
 
     clauses, params = [], []

@@ -36,6 +36,8 @@ def build_pivot_chart_figure(chart_spec):
     unit = data.get("단위", "")
     y_label = f"{data.get('측정값', '')}({unit})" if unit else data.get('측정값', '')
     title = f"{data.get('행', '')}별 {data.get('측정값', '')}" + (f" / {data.get('열')} 비교" if data.get('열') else "")
+    if data.get('데이터기준'):  # 시청이력 기준인지 누적 통계 기준인지 차트에서 바로 보이게
+        title += f"<br><sup>{data['데이터기준']}</sup>"
 
     is_line = (data.get("차트유형") == "선")
     chart_fn = px.line if is_line else px.bar
@@ -52,6 +54,6 @@ def build_pivot_chart_figure(chart_spec):
             fig = px.bar(melted, x=row_col, y=y_label, color=color_col, barmode='group')
 
     if chart_fn is px.bar:
-        fig.update_traces(texttemplate='%{y:,.1f}', textposition='outside')
-    fig.update_layout(title=title, yaxis_title=y_label, xaxis_title=data.get('행', ''), margin=dict(t=50, b=10))
+        fig.update_traces(texttemplate='%{y:,}', textposition='outside')  # 정수는 409, 소수는 12.3 그대로
+    fig.update_layout(title=title, yaxis_title=y_label, xaxis_title=data.get('행', ''), margin=dict(t=70, b=10))
     return fig

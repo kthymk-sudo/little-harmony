@@ -82,6 +82,8 @@ def standardize_columns(df):
         '메뉴': '메뉴명',
         '장르명': '장르',
         'SO': '시청자SO',  # 🌟 [harmony_pulse 추가] 시청자가 속한 SO임을 명확히 표기
+        '노출 수': '노출수', '클릭 수': '클릭수',
+        '노출 클릭율': '노출클릭율', '노출 클릭률': '노출클릭율',
     }
     for old_col, new_col in rename_dict.items():
         if old_col in df.columns and old_col != new_col:
@@ -111,6 +113,11 @@ def clean_history(df):
     df['콘텐츠ID'] = clean_id(df['콘텐츠ID'])
     df['R고객번호'] = fill_zero_id(df['R고객번호'])
     if '시청일' in df.columns:
+        # 🌟 [버그 수정 - 중복 판정] 시청일을 날짜로만 남기면 같은 사람이 같은 영상을
+        # 같은 시간대에 여러 번 본 기록이 중복으로 판정돼 지워졌다(26.08 기준 4,717건).
+        # 초 단위 시각은 '시청일시'로 따로 보존해 중복 판정 키로 쓰고, 기존 코드가
+        # 쓰는 '시청일'(YYYY-MM-DD)은 그대로 둔다.
+        df['시청일시'] = pd.to_datetime(df['시청일'], errors='coerce').dt.strftime('%Y-%m-%d %H:%M:%S')
         df['시청일'] = clean_date(df['시청일'])
     if '시청 유지율' in df.columns:
         df['시청 유지율'] = clean_percent(df['시청 유지율'])
@@ -123,6 +130,29 @@ def clean_history(df):
     return df
 
 
+def clean_content(df):
+    """콘텐츠별 통계(업로더별 시청통계목록) 원본을 정제.
+    조회수/노출수 등은 추출 시점까지의 누적값 스냅샷이라, 새 파일이 오면 콘텐츠ID 기준으로 덮어쓴다."""
+    # 이 파일의 SO는 '업로드한 SO'라서 standardize_columns의 SO -> 시청자SO 매핑보다 먼저 바꾼다
+    df = df.rename(columns=lambda c: '업로더SO' if str(c).strip() == 'SO' else c)
+    df = standardize_columns(df)
+    df = strip_strings(df)
+    df = df.drop(columns=[c for c in ['No', '게시자', '업로드 콘텐츠 용량'] if c in df.columns])
+    df = df.dropna(subset=['콘텐츠ID']).copy()
+    df['콘텐츠ID'] = clean_id(df['콘텐츠ID'])
+    if '등록일' in df.columns:
+        df['등록일'] = clean_date(df['등록일'])
+    if '노출클릭율' in df.columns:
+        df['노출클릭율'] = clean_percent(df['노출클릭율'])
+    for c in ['조회수', '이용자수', '찜하기 수', '댓글 수', '노출수', '클릭수']:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0)
+    for c in ['러닝타임', '평균 시청 지속시간', '누적 시청시간']:
+        if c in df.columns:
+            df[c] = df[c].apply(parse_time_to_seconds)
+    return df
+
+
 def clean_employee(df):
     """당사직원(제외 대상) 리스트 원본을 정제."""
     df = standardize_columns(df)
@@ -130,4 +160,6 @@ def clean_employee(df):
     if 'R고객번호' in df.columns:
         df['R고객번호'] = fill_zero_id(df['R고객번호'])
         df = df.dropna(subset=['R고객번호']).copy()
+        # 제외 처리에는 고객번호만 필요 - 이름/연락처/주소 같은 개인정보는 DB에 남기지 않는다
+        df = df[['R고객번호']].drop_duplicates()
     return df

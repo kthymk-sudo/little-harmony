@@ -23,7 +23,7 @@ def _autosave():
     )
 
 
-def render_analysis_chat(profile_df, db_audience=None):
+def render_analysis_chat(profile_df, db_audience=None, db_content=None):
     inject_chat_css()
 
     st.title("📊 시청 데이터 분석")
@@ -56,7 +56,7 @@ def render_analysis_chat(profile_df, db_audience=None):
         pending = st.session_state.pop('analysis_pending_user_text')
         with st.spinner("분석하는 중..."):
             new_messages, _ = process_analysis_turn(
-                st.session_state.analysis_messages[:-1], pending, profile_df, db_audience,
+                st.session_state.analysis_messages[:-1], pending, profile_df, db_audience, db_content,
             )
             st.session_state.analysis_messages = new_messages
         st.session_state.analysis_stream_next = True

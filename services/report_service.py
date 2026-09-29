@@ -6,13 +6,13 @@
 # (services/analysis_service.run_pivot_analysis)이 계산한다 - 두 탭이 서로
 # 다른 계산 로직을 갖지 않도록 그대로 재사용.
 # ============================================================
-from ai_engine.gemini_api import generate_report_reply, generate_segment_insight_reply, is_api_error
+from ai_engine.gemini_api import generate_report_reply, generate_pivot_insight_reply, is_api_error
 from database.db_manager import summarize_profile_context
-from services.analysis_service import run_pivot_analysis
+from services.analysis_service import run_pivot_analysis, insight_spec_str, insight_rows_str
 from utils.response_parser import parse_target_conditions
 
 
-def process_report_turn(messages, user_text, profile_df, db_audience=None):
+def process_report_turn(messages, user_text, profile_df, db_audience=None, db_content=None):
     """반환: (new_messages, chart_spec). chart_spec은 데이터 요청이 없었거나
     계산 결과가 비었으면 None."""
     history_with_user = messages + [{"role": "user", "text": user_text}]
@@ -26,11 +26,11 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None):
     chart_spec = None
 
     if data_spec.get('행') and data_spec.get('측정값'):
-        pivot_result = run_pivot_analysis(db_audience, profile_df, data_spec)
+        pivot_result = run_pivot_analysis(db_audience, profile_df, data_spec, db_content)
         if pivot_result and pivot_result.get('결과'):
             chart_spec = {"type": "pivot", "data": pivot_result}
-            data_insight = generate_segment_insight_reply(
-                user_text, str(data_spec), str(pivot_result['결과'][:10]),
+            data_insight = generate_pivot_insight_reply(
+                user_text, insight_spec_str(data_spec, pivot_result), insight_rows_str(pivot_result),
             )
             if not is_api_error(data_insight):
                 reply_text = f"{reply_text}\n\n📊 데이터 인사이트\n{data_insight}"

@@ -7,17 +7,25 @@
 # 날짜를 인식하지 못한 행은 아무 안내 없이 조용히 버려졌다. 호출자가 넘긴
 # 원본 DataFrame을 보존하도록 .copy()를 추가하고, 버려지는 행이 있으면
 # 실무자가 알 수 있도록 화면에 경고를 띄우도록 수정.
+#
+# 🌟 [콘텐츠 통계 추가] 콘텐츠별 누적 통계(tb_content)도 메인 DB에 콘텐츠ID
+# 기준으로 적재한다 - 최신 파일이 오면 같은 콘텐츠의 값을 덮어쓴다.
 # ============================================================
 import streamlit as st
 import pandas as pd
-from database.connection import _connect
+from database.connection import _connect, history_db_path
 from database.loader import optimize_db
 
 
-def upsert_to_db(df_history=None, df_employee=None):
+def upsert_to_db(df_history=None, df_employee=None, df_content=None):
     if df_employee is not None and not df_employee.empty:
         conn = _connect()
         _upsert_table(conn, df_employee, 'tb_employee', ['R고객번호'])
+        conn.close()
+
+    if df_content is not None and not df_content.empty:
+        conn = _connect()
+        _upsert_table(conn, df_content, 'tb_content', ['콘텐츠ID'])
         conn.close()
 
     if df_history is not None and not df_history.empty:
@@ -33,17 +41,20 @@ def upsert_to_db(df_history=None, df_employee=None):
         valid_history['month_key'] = valid_history['시청일'].dt.strftime('%Y_%m')
 
         for month_str, month_df in valid_history.groupby('month_key'):
-            db_name = f"harmony_history_{month_str}.db"
+            db_name = history_db_path(month_str)
             conn_hist = _connect(db_name)
 
             save_df = month_df.drop(columns=['month_key']).copy()
             save_df['시청일'] = save_df['시청일'].dt.strftime('%Y-%m-%d')
 
-            _upsert_table(conn_hist, save_df, 'tb_history', ['콘텐츠ID', 'R고객번호', '시청일', '시청시간대'])
+            # 🌟 [버그 수정 - 중복 판정] 날짜+시간대가 아니라 초 단위 시청일시로 중복을 판정한다
+            # (같은 시간대에 같은 영상을 여러 번 본 서로 다른 기록이 지워지던 문제).
+            _upsert_table(conn_hist, save_df, 'tb_history', ['콘텐츠ID', 'R고객번호', '시청일시'])
 
             idx_cursor = conn_hist.cursor()
             idx_cursor.execute('CREATE INDEX IF NOT EXISTS idx_tb_history_date ON tb_history("시청일")')
-            idx_cursor.execute('CREATE INDEX IF NOT EXISTS idx_tb_history_dedup ON tb_history("콘텐츠ID", "R고객번호", "시청일", "시청시간대")')
+            idx_cursor.execute('DROP INDEX IF EXISTS idx_tb_history_dedup')
+            idx_cursor.execute('CREATE INDEX IF NOT EXISTS idx_tb_history_dedup2 ON tb_history("콘텐츠ID", "R고객번호", "시청일시")')
             conn_hist.commit()
 
             optimize_db(conn_hist)

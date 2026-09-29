@@ -18,7 +18,7 @@
 from database.connection import _connect, get_data_version, get_loaded_periods
 from database.upsert import upsert_to_db, _upsert_table
 from database.loader import (
-    load_from_db, load_history_period, load_employee_list, has_history_data,
+    load_from_db, load_history_period, load_employee_list, load_content, has_history_data,
     optimize_db, _load_from_db_cached, _load_employee_cached, _load_history_period_cached,
 )
 from database.audience import (
@@ -41,7 +41,7 @@ from database.conversation_store import (
 __all__ = [
     "_connect", "get_data_version", "get_loaded_periods",
     "upsert_to_db", "_upsert_table",
-    "load_from_db", "load_history_period", "load_employee_list", "has_history_data", "optimize_db",
+    "load_from_db", "load_history_period", "load_employee_list", "load_content", "has_history_data", "optimize_db",
     "build_audience_db", "build_audience_profile", "filter_by_period", "summarize_profile_context",
     "summarize_segment_insight", "format_segment_insight_reply", "apply_target_conditions",
     "summarize_content_ranking", "format_content_ranking_reply",

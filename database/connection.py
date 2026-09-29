@@ -11,6 +11,21 @@ import glob
 from config import DB_PATH
 
 
+# 🌟 [버그 수정 - 실행 폴더 의존] 월별 시청내역 DB를 "실행한 폴더" 기준 상대경로로 찾던
+# 것을, 메인 DB(DB_PATH)와 같은 프로젝트 폴더 기준으로 고정한다 - 다른 폴더에서 앱을
+# 실행해도 데이터를 못 찾거나 엉뚱한 곳에 새 DB가 생기지 않게.
+_DATA_DIR = os.path.dirname(DB_PATH)
+
+
+def history_db_files():
+    return glob.glob(os.path.join(_DATA_DIR, "harmony_history_*.db"))
+
+
+def history_db_path(month_str):
+    """month_str: 'YYYY_MM'"""
+    return os.path.join(_DATA_DIR, f"harmony_history_{month_str}.db")
+
+
 def _connect(db_file=DB_PATH):
     conn = sqlite3.connect(db_file, timeout=20)
     try:
@@ -27,7 +42,7 @@ def get_data_version():
     던져 앱이 그대로 죽었다. 파일이 하나도 없는 경우 0을 반환하도록 수정.
     """
     try:
-        files = [DB_PATH] + glob.glob("harmony_history_*.db")
+        files = [DB_PATH] + history_db_files()
         mtimes = [os.path.getmtime(f) for f in files if os.path.exists(f)]
         return max(mtimes) if mtimes else 0
     except OSError:
@@ -41,7 +56,7 @@ def get_loaded_periods():
     들어있는지 바로 알 수 있다. 각 파일을 열어 실제 건수도 함께 세어준다.
     """
     periods = []
-    for db_file in glob.glob("harmony_history_*.db"):
+    for db_file in history_db_files():
         base = os.path.basename(db_file)
         # "harmony_history_2026_08.db" -> "2026_08" -> "2026-08"
         month_label = base.replace("harmony_history_", "").replace(".db", "").replace("_", "-")

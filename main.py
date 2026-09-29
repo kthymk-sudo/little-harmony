@@ -16,7 +16,7 @@ import streamlit as st
 
 from config import init_session_state
 from database.db_manager import (
-    load_from_db, load_history_period, load_employee_list, has_history_data,
+    load_from_db, load_history_period, load_employee_list, load_content, has_history_data,
     build_audience_db, build_audience_profile, filter_by_period, get_data_version,
 )
 from ui.sidebar import render_sidebar
@@ -54,12 +54,12 @@ period_version = f"{data_version}_{period_start}_{period_end}"
 db_audience = build_audience_db(df_history, df_employee, version=period_version)
 # 이미 SQL 단계에서 기간이 걸러졌다면 여기서는 사실상 통과만 시키는 저비용 안전장치로 남는다
 # (필터 미적용 상태의 df_history가 넘어오는 경우에도 항상 정확한 결과를 보장).
-db_audience = filter_by_period(db_audience, period_start, period_end)
+db_audience = filter_by_period(db_audience, period_start, period_end, version=period_version)
 profile_df = build_audience_profile(db_audience, version=period_version)
 
 if st.session_state.active_feature == 'analysis':
-    render_analysis_chat(profile_df, db_audience)
+    render_analysis_chat(profile_df, db_audience, load_content())
 elif st.session_state.active_feature == 'report':
-    render_report_chat(profile_df, db_audience)
+    render_report_chat(profile_df, db_audience, load_content())
 else:
     render_chat_app(profile_df, db_audience)

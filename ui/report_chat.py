@@ -23,7 +23,7 @@ def _autosave():
     )
 
 
-def render_report_chat(profile_df, db_audience=None):
+def render_report_chat(profile_df, db_audience=None, db_content=None):
     inject_chat_css()
 
     st.title("📝 분석서&보고서")
@@ -67,7 +67,7 @@ def render_report_chat(profile_df, db_audience=None):
         pending = st.session_state.pop('report_pending_user_text')
         with st.spinner("보고서를 정리하는 중..."):
             new_messages, _ = process_report_turn(
-                st.session_state.report_messages[:-1], pending, profile_df, db_audience,
+                st.session_state.report_messages[:-1], pending, profile_df, db_audience, db_content,
             )
             st.session_state.report_messages = new_messages
         st.session_state.report_stream_next = True
