@@ -9,7 +9,7 @@
 import streamlit as st
 from config import start_new_analysis_conversation
 from database.db_manager import save_conversation, make_conversation_title
-from services.analysis_service import process_analysis_turn, chart_spec_from
+from services.analysis_service import process_analysis_turn, process_feedback_request, chart_spec_from
 from ui.chart_render import build_pivot_chart_figure, pivot_table_df
 from ui.chat_styles import inject_chat_css, render_message
 
@@ -34,7 +34,7 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
     if not st.session_state.analysis_messages:
         greeting = (
             "안녕하세요! 시청 데이터에 대해 궁금한 걸 편하게 물어봐주세요. 실제 데이터를 집계해서 답해드릴게요. "
-            "그래프가 필요하면 '그래프로 보여줘'라고 하시거나 답변 아래 버튼을 눌러주세요."
+            "그래프나 전체 데이터와 비교한 피드백이 필요하면 말씀하시거나 답변 아래 버튼을 눌러주세요."
         )
         render_message("assistant", greeting, animate=st.session_state.get('analysis_greet_stream_pending', False))
         st.session_state.analysis_greet_stream_pending = False
@@ -53,12 +53,26 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
             if table_df is not None:
                 with st.expander("표로 보기"):
                     st.dataframe(table_df, width='stretch')
-        elif turn.get("data"):
-            # 🌟 [대화형 분석] 숫자로만 답한 결과는 실무자가 원할 때 그래프로 만든다(AI 재호출 없음)
-            if st.button("📊 그래프로 보기", key=f"analysis_to_chart_{i}"):
-                turn["chart"] = chart_spec_from(turn["data"])
+        if turn.get("data"):
+            # 🌟 [대화형 분석] 그래프와 전체 비교 피드백은 실무자가 원할 때만 만든다
+            chart_col, feedback_col, _ = st.columns([1, 1.4, 3])
+            if fig is None and chart_col.button("📊 그래프로 보기", key=f"analysis_to_chart_{i}"):
+                turn["chart"] = chart_spec_from(turn["data"])  # AI 재호출 없음
                 _autosave()
                 st.rerun()
+            if feedback_col.button("🔍 전체와 비교 피드백", key=f"analysis_feedback_{i}"):
+                st.session_state.analysis_pending_feedback = i
+                st.rerun()
+
+    if st.session_state.get('analysis_pending_feedback') is not None:
+        index = st.session_state.pop('analysis_pending_feedback')
+        with st.spinner("전체 데이터와 비교하는 중..."):
+            st.session_state.analysis_messages = process_feedback_request(
+                st.session_state.analysis_messages, index, profile_df, db_audience, db_content,
+            )
+        st.session_state.analysis_stream_next = True
+        _autosave()
+        st.rerun()
 
     if st.session_state.get('analysis_pending_user_text'):
         pending = st.session_state.pop('analysis_pending_user_text')

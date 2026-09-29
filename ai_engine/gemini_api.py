@@ -5,7 +5,7 @@ import streamlit as st
 from config import GEMINI_API_KEY
 from prompts.target_chat_prompt import get_target_chat_prompt, get_target_reasoning_prompt, get_segment_insight_prompt
 from prompts.push_prompt import get_push_prompt, get_sms_prompt
-from prompts.analysis_chat_prompt import get_analysis_chat_prompt, get_pivot_insight_prompt
+from prompts.analysis_chat_prompt import get_analysis_chat_prompt, get_pivot_insight_prompt, get_comparison_feedback_prompt
 from prompts.report_prompt import get_report_prompt
 
 _http_session = requests.Session()
@@ -233,6 +233,11 @@ def generate_segment_insight_reply(question_str, conditions_str, insight_stats_s
 def generate_pivot_insight_reply(question_str, spec_str, result_str, conversation=None, follow_up=False):
     conversation_str = _format_chat_history(conversation) if conversation else ""
     prompt = get_pivot_insight_prompt(question_str, spec_str, result_str, conversation_str, follow_up)
+    return _call_gemini_api(prompt, temperature=0.4)
+
+def generate_comparison_feedback_reply(question_str, comparison_str, conversation=None):
+    conversation_str = _format_chat_history(conversation) if conversation else ""
+    prompt = get_comparison_feedback_prompt(question_str, comparison_str, conversation_str)
     return _call_gemini_api(prompt, temperature=0.4)
 
 def generate_analysis_chat_reply(chat_history, profile_context_str):
