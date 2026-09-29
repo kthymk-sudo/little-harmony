@@ -230,8 +230,9 @@ def generate_segment_insight_reply(question_str, conditions_str, insight_stats_s
     prompt = get_segment_insight_prompt(question_str, conditions_str, insight_stats_str)
     return _call_gemini_api(prompt, temperature=0.4)
 
-def generate_pivot_insight_reply(question_str, spec_str, result_str):
-    prompt = get_pivot_insight_prompt(question_str, spec_str, result_str)
+def generate_pivot_insight_reply(question_str, spec_str, result_str, conversation=None, follow_up=False):
+    conversation_str = _format_chat_history(conversation) if conversation else ""
+    prompt = get_pivot_insight_prompt(question_str, spec_str, result_str, conversation_str, follow_up)
     return _call_gemini_api(prompt, temperature=0.4)
 
 def generate_analysis_chat_reply(chat_history, profile_context_str):

@@ -53,7 +53,7 @@ def build_pivot_chart_figure(chart_spec):
         else:
             fig = px.bar(melted, x=row_col, y=y_label, color=color_col, barmode='group')
 
-    if chart_fn is px.bar:
+    if chart_fn is px.bar and len(series_cols) <= 1:  # 여러 계열이면 막대마다 숫자가 붙어 빽빽해지므로 생략
         fig.update_traces(texttemplate='%{y:,}', textposition='outside')  # 정수는 409, 소수는 12.3 그대로
     fig.update_layout(title=title, yaxis_title=y_label, xaxis_title=data.get('행', ''), margin=dict(t=70, b=10))
     return fig

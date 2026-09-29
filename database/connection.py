@@ -8,22 +8,25 @@
 import os
 import sqlite3
 import glob
-from config import DB_PATH
+from config import DATA_DIR, DB_PATH, CONTENT_DB_PATH, EMPLOYEE_DB_PATH
 
-
-# 🌟 [버그 수정 - 실행 폴더 의존] 월별 시청내역 DB를 "실행한 폴더" 기준 상대경로로 찾던
-# 것을, 메인 DB(DB_PATH)와 같은 프로젝트 폴더 기준으로 고정한다 - 다른 폴더에서 앱을
-# 실행해도 데이터를 못 찾거나 엉뚱한 곳에 새 DB가 생기지 않게.
-_DATA_DIR = os.path.dirname(DB_PATH)
+# 🌟 [DB 폴더 일원화] 모든 DB는 프로젝트 폴더의 data/ 안에만 둔다(실행 폴더와 무관한 절대경로).
+os.makedirs(DATA_DIR, exist_ok=True)
+_HISTORY_PREFIX = "시청_"
 
 
 def history_db_files():
-    return glob.glob(os.path.join(_DATA_DIR, "harmony_history_*.db"))
+    return sorted(glob.glob(os.path.join(DATA_DIR, f"{_HISTORY_PREFIX}*.db")))
 
 
 def history_db_path(month_str):
     """month_str: 'YYYY_MM'"""
-    return os.path.join(_DATA_DIR, f"harmony_history_{month_str}.db")
+    return os.path.join(DATA_DIR, f"{_HISTORY_PREFIX}{month_str}.db")
+
+
+def history_db_month(db_file):
+    """'.../시청_2026_08.db' -> '2026-08'"""
+    return os.path.basename(db_file)[len(_HISTORY_PREFIX):-len(".db")].replace("_", "-")
 
 
 def _connect(db_file=DB_PATH):
@@ -40,9 +43,12 @@ def get_data_version():
     🌟 [버그 수정] 기존에는 적재된 DB 파일이 하나도 없을 때(예: 배포 직후,
     데이터를 한 번도 업로드하지 않은 상태) max()가 빈 시퀀스에 대해 ValueError를
     던져 앱이 그대로 죽었다. 파일이 하나도 없는 경우 0을 반환하도록 수정.
+
+    🌟 [캐시 무효화 범위] 대화 기록 DB는 버전 계산에서 뺀다 - 대화를 저장할 때마다
+    데이터 버전이 바뀌어 매 턴 시청 데이터 캐시를 통째로 다시 계산하던 문제.
     """
     try:
-        files = [DB_PATH] + history_db_files()
+        files = [CONTENT_DB_PATH, EMPLOYEE_DB_PATH] + history_db_files()
         mtimes = [os.path.getmtime(f) for f in files if os.path.exists(f)]
         return max(mtimes) if mtimes else 0
     except OSError:
@@ -51,15 +57,13 @@ def get_data_version():
 
 def get_loaded_periods():
     """
-    🌟 [시스템 정보 - 월별 적재 현황] 시청내역 DB 자체가 harmony_history_YYYY_MM.db
+    🌟 [시스템 정보 - 월별 적재 현황] 시청내역 DB 자체가 data/시청_YYYY_MM.db
     파일로 월별 분리되어 있으므로, 지금 존재하는 파일 목록만 보면 어느 달 데이터가
     들어있는지 바로 알 수 있다. 각 파일을 열어 실제 건수도 함께 세어준다.
     """
     periods = []
     for db_file in history_db_files():
-        base = os.path.basename(db_file)
-        # "harmony_history_2026_08.db" -> "2026_08" -> "2026-08"
-        month_label = base.replace("harmony_history_", "").replace(".db", "").replace("_", "-")
+        month_label = history_db_month(db_file)
 
         row_count = 0
         try:

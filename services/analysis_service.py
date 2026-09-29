@@ -200,7 +200,7 @@ def _format_pivot_fallback_reply(pivot_result):
     if not rows:
         return "말씀하신 조건에 맞는 시청 데이터를 찾지 못했어요. 조건을 조금 다르게 말씀해주시겠어요?"
     return (f"{pivot_result['행']}별 {pivot_result['측정값']}({pivot_result['단위']}) 기준으로 총 {pivot_result['전체행수']}개 "
-            f"항목이 나왔어요({pivot_result['데이터기준']}). 표와 그래프를 확인해보세요.")
+            f"항목이 나왔어요({pivot_result['데이터기준']}). 그래프가 필요하면 답변 아래 버튼을 눌러주세요.")
 
 
 def insight_rows_str(pivot_result, limit=30):
@@ -219,35 +219,82 @@ def insight_spec_str(spec, pivot_result):
     return str({**spec, '데이터기준': pivot_result['데이터기준'], '단위': pivot_result['단위']})
 
 
+_RECENT_TURNS_FOR_INSIGHT = 6
+
+
+def chart_spec_from(data, chart_type=None):
+    """집계 결과(data)로 화면용 chart_spec을 만든다. chart_type이 오면 막대/선만 바꾼다."""
+    if chart_type in ('막대', '선'):
+        data = {**data, '차트유형': chart_type}
+    return {"type": "pivot", "data": data}
+
+
+def _spec_core(spec):
+    """같은 집계인지 비교용 - 차트 종류/그래프 요청 여부는 집계 결과에 영향이 없으므로 뺀다."""
+    return (
+        (spec.get('분석대상') or '시청').strip(), (spec.get('행') or '').strip(), (spec.get('열') or '').strip(),
+        (spec.get('측정값') or '').strip(), (spec.get('집계방식') or '').strip(), str(spec.get('필터조건') or {}),
+    )
+
+
+def _history_for_ai(messages):
+    """AI가 "그럼 여성만"/"그래프로 만들어줘" 같은 후속 요청을 이어갈 수 있도록, 데이터를 집계한
+    답변 뒤에 실제로 쓴 스펙을 붙여서 넘긴다(화면에 보이는 텍스트만으로는 기준을 알 수 없음)."""
+    return [
+        {**m, 'text': f"{m['text']}\n[이 답변에서 집계한 스펙: {m['spec']}]"} if m.get('spec') else m
+        for m in messages
+    ]
+
+
+def _last_data_message(messages):
+    return next((m for m in reversed(messages) if m.get('role') == 'assistant' and m.get('data')), None)
+
+
 def process_analysis_turn(messages, user_text, profile_df, db_audience=None, db_content=None):
-    """반환: (new_messages, chart_spec)
-    chart_spec: {"type": "pivot", "data": pivot_result} 또는 결과가 없으면 None."""
+    """🌟 [대화형 분석] 한 턴 처리. 반환: (new_messages, chart_spec 또는 None)
+    - 데이터가 필요한 질문: 실제로 집계하고, 그 숫자로 대화형 답변을 만든다. 결과는 답변 메시지의
+      "data"(+ 쓴 스펙 "spec")에 담고, 그래프는 실무자가 원할 때만 "chart"로 붙인다.
+    - 되묻기/상의: AI 답변만 남긴다.
+    - "그래프로 만들어줘": 직전과 같은 집계면 다시 계산하지 않고 직전 결과로 그래프를 붙인다."""
     history_with_user = messages + [{"role": "user", "text": user_text}]
     profile_context_str = summarize_profile_context(profile_df)
 
-    ai_raw = generate_analysis_chat_reply(history_with_user, profile_context_str)
+    ai_raw = generate_analysis_chat_reply(_history_for_ai(history_with_user), profile_context_str)
     reply_text, spec = parse_target_conditions(ai_raw)
     spec = spec or {}
-
-    pivot_result = run_pivot_analysis(db_audience, profile_df, spec, db_content)
-    chart_spec = None
-    fallback_reply = _format_pivot_fallback_reply(pivot_result)
-
-    if pivot_result and pivot_result.get('결과'):
-        chart_spec = {"type": "pivot", "data": pivot_result}
-        ai_reply = generate_pivot_insight_reply(
-            user_text, insight_spec_str(spec, pivot_result), insight_rows_str(pivot_result),
-        )
-        reply_text = fallback_reply if is_api_error(ai_reply) else ai_reply
-    elif spec.get('행') or spec.get('측정값'):
-        # AI가 분류는 했지만(행/측정값 중 하나라도 채움) 결과가 비었거나 필드가 무효한 경우
-        reply_text = fallback_reply
-
+    wants_chart = spec.pop('그래프요청', False) is True
+    has_spec = bool(spec.get('행') and spec.get('측정값'))
+    last = _last_data_message(messages)
     new_message = {"role": "assistant", "text": reply_text}
-    if chart_spec:
-        new_message["chart"] = chart_spec
-    new_messages = history_with_user + [new_message]
-    return new_messages, chart_spec
+
+    if wants_chart and last and (not has_spec or _spec_core(spec) == _spec_core(last.get('spec') or {})):
+        new_message.update(
+            text=f"방금 본 결과({last['data']['행']}별 {last['data']['측정값']})를 그래프로 만들었어요.",
+            data=last['data'], spec=last.get('spec'),
+            chart=chart_spec_from(last['data'], spec.get('차트유형')),
+        )
+    elif has_spec:
+        pivot_result = run_pivot_analysis(db_audience, profile_df, spec, db_content)
+        if pivot_result and pivot_result.get('결과'):
+            ai_reply = generate_pivot_insight_reply(
+                user_text, insight_spec_str(spec, pivot_result), insight_rows_str(pivot_result),
+                conversation=_history_for_ai(messages[-_RECENT_TURNS_FOR_INSIGHT:]), follow_up=True,
+            )
+            new_message.update(
+                text=_format_pivot_fallback_reply(pivot_result) if is_api_error(ai_reply) else ai_reply,
+                data=pivot_result, spec=spec,
+            )
+            if wants_chart:
+                new_message['chart'] = chart_spec_from(pivot_result)
+        else:
+            # AI가 스펙은 정했지만 결과가 비었거나 필드가 무효한 경우
+            new_message['text'] = _format_pivot_fallback_reply(pivot_result)
+    elif wants_chart:
+        new_message['text'] = "아직 그래프로 만들 분석 결과가 없어요. 먼저 궁금한 걸 물어봐주시면 데이터로 확인해드릴게요."
+
+    if not new_message['text']:
+        new_message['text'] = "어떤 걸 살펴볼까요? 궁금한 점을 편하게 말씀해주세요."
+    return history_with_user + [new_message], new_message.get('chart')
 
 
 if __name__ == "__main__":
@@ -278,4 +325,27 @@ if __name__ == "__main__":
     assert one({'행': '영상명', '측정값': '시청유지율'}) == {'A': 75.0, 'B': 100.0}
     assert one({'행': '업로더 구분', '측정값': '시청자수'}) == {'당사직원': 2, '이웃파트너': 2}
     assert run_pivot_analysis(views, None, {'분석대상': '콘텐츠', '행': '채널명', '측정값': '시청건수'}, content) is None
+
+    # 대화형 턴: AI 호출은 가짜로 바꿔서 흐름만 검사한다
+    import json
+    ai_calls = []
+
+    def fake_turn(spec, text="확인해볼게요"):
+        globals()['generate_analysis_chat_reply'] = lambda *a: f"{text}\n```json\n{json.dumps(spec, ensure_ascii=False)}\n```"
+        globals()['generate_pivot_insight_reply'] = lambda *a, **k: ai_calls.append(k) or "A가 가장 많아요. 채널별로도 볼까요?"
+        globals()['summarize_profile_context'] = lambda *a: ""
+
+    msgs = []
+    fake_turn({'행': '영상명', '측정값': '시청건수', '그래프요청': False})
+    msgs, chart = process_analysis_turn(msgs, "영상별로 얼마나 봤어?", None, views, content)
+    assert chart is None and msgs[-1]['data']['결과'] and 'chart' not in msgs[-1], "숫자로만 답하고 그래프는 안 만든다"
+    assert ai_calls[-1]['follow_up'] is True
+    n_calls = len(ai_calls)
+    fake_turn({'행': '영상명', '측정값': '시청건수', '차트유형': '선', '그래프요청': True})
+    msgs, chart = process_analysis_turn(msgs, "그래프로 보여줘", None, views, content)
+    assert chart and chart['data']['차트유형'] == '선' and len(ai_calls) == n_calls, "같은 집계면 재계산/재설명 없이 그래프만"
+    fake_turn({'행': '', '측정값': '', '그래프요청': False}, text="시청자수 기준으로 볼까요, 누적 조회수 기준으로 볼까요?")
+    msgs, chart = process_analysis_turn(msgs, "인기 콘텐츠 알려줘", None, views, content)
+    assert chart is None and 'data' not in msgs[-1] and msgs[-1]['text'].startswith("시청자수 기준")
+    assert "[이 답변에서 집계한 스펙" in _history_for_ai(msgs)[1]['text']
     print("analysis_service self-check OK")

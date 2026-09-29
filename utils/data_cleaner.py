@@ -112,6 +112,11 @@ def clean_history(df):
     df = df.dropna(subset=['콘텐츠ID', 'R고객번호']).copy()
     df['콘텐츠ID'] = clean_id(df['콘텐츠ID'])
     df['R고객번호'] = fill_zero_id(df['R고객번호'])
+    if '나이' in df.columns:
+        # 원본은 "나이 모름"을 -1로 적는다 - 그대로 두면 "-10대"로 집계되고 "50세 이하" 같은
+        # 조건에도 걸리므로 빈 값(미상)으로 바꾼다
+        age = pd.to_numeric(df['나이'], errors='coerce')
+        df['나이'] = age.where(age >= 0).astype('Int64')
     if '시청일' in df.columns:
         # 🌟 [버그 수정 - 중복 판정] 시청일을 날짜로만 남기면 같은 사람이 같은 영상을
         # 같은 시간대에 여러 번 본 기록이 중복으로 판정돼 지워졌다(26.08 기준 4,717건).
@@ -127,6 +132,29 @@ def clean_history(df):
     for c in ['러닝타임', '시청시간']:
         if c in df.columns:
             df[c] = df[c].apply(parse_time_to_seconds)
+    return df
+
+
+def finalize_history(df, employee_ids):
+    """🌟 [DB 폴더 일원화] 정제된 시청이력을 "분석용 가공 완료본"으로 만든다 - 저장할 때
+    한 번만 적용하고 월별 파일에 그대로 고정한다(나중에 바뀌지 않는 가공만 여기서 한다.
+    업로더/제작자/삭제 여부처럼 바뀔 수 있는 콘텐츠 정보는 분석할 때 최신 통계에서 붙인다)."""
+    # 당사 직원 제외 - 이 달을 가공하는 시점의 직원 명단 기준
+    df = df[~df['R고객번호'].astype(str).str.strip().isin(set(employee_ids))].copy()
+
+    # 🌟 [시청 시작 시각] 원본 시청시간대는 "시작시각 ~ 종료시각"이라 같은 14시 시작도
+    # "14시 ~ 14시"/"14시 ~ 15시"로 쪼개져 120여 가지가 된다. 시작 시각만 뽑아
+    # "00시"~"23시" 24개로 통일한다(두 자리로 맞춰야 문자열 정렬이 곧 시간순).
+    if '시청시간대' in df.columns:
+        start_hour = df['시청시간대'].astype(str).str.extract(r'^\s*(\d{1,2})\s*시', expand=False)
+        df['시청시작시'] = (start_hour.str.zfill(2) + '시').where(start_hour.notna())
+
+    # 🌟 [유지율 계산 불가 처리] 원본에서 러닝타임이 00:00:00인 콘텐츠는 몇 시간을 봤어도
+    # 유지율이 0.00%로 찍혀 나온다(26.04~09 기준 755건, 콘텐츠 35개). 실제 0%가 아니라
+    # "계산 불가"이므로 빈 값으로 바꿔 평균 유지율/완료율 계산에서 빠지게 한다.
+    if '러닝타임' in df.columns and '시청 유지율' in df.columns:
+        no_runtime = pd.to_numeric(df['러닝타임'], errors='coerce').fillna(0) <= 0
+        df['시청 유지율'] = pd.to_numeric(df['시청 유지율'], errors='coerce').mask(no_runtime)
     return df
 
 

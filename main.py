@@ -11,13 +11,15 @@
 # 기준 약 10초). 시청기간 필터가 켜져 있을 때는 SQL 단계에서부터 그 기간만 조회하는
 # load_history_period()를 대신 써서, 로딩 시간이 '누적된 전체 데이터양'이 아니라
 # '선택한 기간의 크기'에 비례하도록 바꿨다(같은 조건에서 약 1초로 단축).
+#
+# 🌟 [DB 폴더 일원화] data/시청_YYYY_MM.db는 저장할 때 가공(직원 제외 등)이 끝난
+# 완성본이다. 여기서는 시청기간에 걸치는 달 파일만 꺼내 그대로 쓴다.
 # ============================================================
 import streamlit as st
 
 from config import init_session_state
 from database.db_manager import (
-    load_from_db, load_history_period, load_employee_list, load_content, has_history_data,
-    build_audience_db, build_audience_profile, filter_by_period, get_data_version,
+    load_history_period, load_content, has_history_data, build_audience_profile, get_data_version,
 )
 from ui.sidebar import render_sidebar
 from ui.chat_app import render_chat_app
@@ -40,21 +42,11 @@ data_version = get_data_version()
 period_start = st.session_state.get('period_start')
 period_end = st.session_state.get('period_end')
 
-if period_start or period_end:
-    # 시청기간이 지정된 경우: SQL 단계에서부터 그 기간만 읽어와 누적 데이터양과 무관하게 빠르게 로딩.
-    df_history = load_history_period(period_start, period_end)
-    df_employee = load_employee_list()
-else:
-    df_history, df_employee = load_from_db()
+db_audience = load_history_period(period_start, period_end)
 
-# 🌟 df_history 자체가 이미 기간에 따라 달라지므로(전체 vs 특정 기간), build_audience_db와
-# build_audience_profile의 캐시 키에도 데이터 버전뿐 아니라 기간을 함께 넣어야 서로 다른
-# 기간 조회 결과가 캐시에서 뒤섞이지 않는다.
+# 🌟 db_audience 자체가 기간에 따라 달라지므로(전체 vs 특정 기간), build_audience_profile의
+# 캐시 키에도 데이터 버전뿐 아니라 기간을 함께 넣어야 서로 다른 기간 결과가 뒤섞이지 않는다.
 period_version = f"{data_version}_{period_start}_{period_end}"
-db_audience = build_audience_db(df_history, df_employee, version=period_version)
-# 이미 SQL 단계에서 기간이 걸러졌다면 여기서는 사실상 통과만 시키는 저비용 안전장치로 남는다
-# (필터 미적용 상태의 df_history가 넘어오는 경우에도 항상 정확한 결과를 보장).
-db_audience = filter_by_period(db_audience, period_start, period_end, version=period_version)
 profile_df = build_audience_profile(db_audience, version=period_version)
 
 if st.session_state.active_feature == 'analysis':

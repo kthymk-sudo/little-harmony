@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 from config import ACTIVE_SEGMENT_DAYS, DORMANT_SEGMENT_DAYS
-from utils.data_cleaner import standardize_columns
 
 # 🌟 [취향 다각도 분석] 선호장르/선호채널/선호메뉴/선호시청시간대를 "1위 하나"가
 # 아니라 "1위와 충분히 근접한 항목 전부"로 잡기 위한 기준값. RATIO는 1위 시청
@@ -18,51 +17,10 @@ _PREFERENCE_RATIO_THRESHOLD = 0.6
 _PREFERENCE_MIN_COUNT = 2
 
 
-@st.cache_data(show_spinner=False, persist="disk", max_entries=10)
-def build_audience_db(_df_history, _df_employee, version=None):
-    if _df_history is None or _df_history.empty:
-        return _df_history
-
-    df = standardize_columns(_df_history.copy())
-
-    if _df_employee is not None and not _df_employee.empty and 'R고객번호' in _df_employee.columns:
-        df_employee = standardize_columns(_df_employee.copy())
-        emp_ids = df_employee['R고객번호'].dropna().astype(str).str.strip().tolist()
-        df = df[~df['R고객번호'].astype(str).str.strip().isin(emp_ids)]
-
-    # 🌟 [시청 시작 시각] 원본 시청시간대는 "시작시각 ~ 종료시각"이라 같은 14시 시작도
-    # "14시 ~ 14시"/"14시 ~ 15시"로 쪼개져 120여 가지가 된다. 시작 시각만 뽑아
-    # "00시"~"23시" 24개로 통일한다(두 자리로 맞춰야 문자열 정렬이 곧 시간순).
-    if '시청시간대' in df.columns:
-        start_hour = df['시청시간대'].astype(str).str.extract(r'^\s*(\d{1,2})\s*시', expand=False)
-        df = df.assign(시청시작시=(start_hour.str.zfill(2) + '시').where(start_hour.notna()))
-
-    # 🌟 [유지율 계산 불가 처리] 원본에서 러닝타임이 00:00:00인 콘텐츠는 몇 시간을 봤어도
-    # 유지율이 0.00%로 찍혀 나온다(26.04~09 기준 755건, 콘텐츠 35개). 실제 0%가 아니라
-    # "계산 불가"이므로 빈 값으로 바꿔 평균 유지율/완료율 계산에서 빠지게 한다.
-    if '러닝타임' in df.columns and '시청 유지율' in df.columns:
-        no_runtime = pd.to_numeric(df['러닝타임'], errors='coerce').fillna(0) <= 0
-        df = df.assign(**{'시청 유지율': pd.to_numeric(df['시청 유지율'], errors='coerce').mask(no_runtime)})
-
-    return df
-
-
-# 🌟 [버그 수정 - 오래된 캐시] _db_audience는 캐시 키에서 빠지는 인자라, 예전에는 키가
-# (시작일, 종료일)뿐이었다. 그래서 데이터가 바뀌어도 같은 기간이면 디스크에 저장된 옛 결과
-# (26.09.28 저장분)를 계속 돌려줬다. 다른 캐시 함수들처럼 version을 키에 넣는다.
-@st.cache_data(show_spinner=False, persist="disk", max_entries=30)
-def filter_by_period(_db_audience, start_date=None, end_date=None, version=None):
-    if _db_audience is None or _db_audience.empty or '시청일' not in _db_audience.columns:
-        return _db_audience
-    if start_date is None and end_date is None:
-        return _db_audience
-
-    df = _db_audience[_db_audience['시청일'].notna()].copy()
-    if start_date is not None:
-        df = df[df['시청일'] >= str(start_date)]
-    if end_date is not None:
-        df = df[df['시청일'] <= str(end_date)]
-    return df
+# 🌟 [DB 폴더 일원화] 예전 build_audience_db(직원 제외/시작시각/유지율 정리)와
+# filter_by_period(기간 필터)는 앱을 켤 때마다 돌았다. 이제 그 가공은 저장할 때
+# 한 번만 하고(utils/data_cleaner.finalize_history), 기간 필터는 필요한 달 파일만
+# 여는 loader.load_history_period가 SQL로 처리한다.
 
 
 @st.cache_data(show_spinner=False, persist="disk", max_entries=10)

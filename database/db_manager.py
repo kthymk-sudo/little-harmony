@@ -4,8 +4,8 @@
 # 가까운 함수가 전부 들어있었다. 파일이 너무 길어지면 한 군데 실수가 전체에
 # 영향을 줄 위험이 커진다고 판단해, 실제 로직은 아래 파일들로 분리했다.
 #   - database/connection.py         : DB 연결, 데이터 버전 확인
-#   - database/upsert.py             : 시청내역/직원리스트 적재(upsert)
-#   - database/loader.py             : 캐시된 데이터 로딩
+#   - database/upsert.py             : 시청내역(가공 후 월별)/직원리스트/콘텐츠 통계 적재(upsert)
+#   - database/loader.py             : 필요한 달 파일만 꺼내는 캐시된 데이터 로딩
 #   - database/audience.py           : 오디언스 집계/타겟 필터링
 #   - database/formatting.py         : 조건/집계 결과를 사람이 읽는 문장으로 변환
 #   - database/conversation_store.py : 대화 저장/불러오기/삭제
@@ -18,11 +18,10 @@
 from database.connection import _connect, get_data_version, get_loaded_periods
 from database.upsert import upsert_to_db, _upsert_table
 from database.loader import (
-    load_from_db, load_history_period, load_employee_list, load_content, has_history_data,
-    optimize_db, _load_from_db_cached, _load_employee_cached, _load_history_period_cached,
+    load_history_period, load_content, has_history_data, optimize_db, _load_history_period_cached,
 )
 from database.audience import (
-    build_audience_db, build_audience_profile, filter_by_period, summarize_profile_context,
+    build_audience_profile, summarize_profile_context,
     summarize_segment_insight, format_segment_insight_reply, apply_target_conditions,
     summarize_content_ranking, format_content_ranking_reply,
     summarize_group_breakdown, format_group_breakdown_reply,
@@ -41,8 +40,8 @@ from database.conversation_store import (
 __all__ = [
     "_connect", "get_data_version", "get_loaded_periods",
     "upsert_to_db", "_upsert_table",
-    "load_from_db", "load_history_period", "load_employee_list", "load_content", "has_history_data", "optimize_db",
-    "build_audience_db", "build_audience_profile", "filter_by_period", "summarize_profile_context",
+    "load_history_period", "load_content", "has_history_data", "optimize_db",
+    "build_audience_profile", "summarize_profile_context",
     "summarize_segment_insight", "format_segment_insight_reply", "apply_target_conditions",
     "summarize_content_ranking", "format_content_ranking_reply",
     "summarize_group_breakdown", "format_group_breakdown_reply",

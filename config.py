@@ -13,7 +13,12 @@ if getattr(sys, 'frozen', False):
 else:
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
-DB_PATH = os.path.join(base_dir, 'harmony_pulse_data.db')
+# 🌟 [DB 폴더 일원화] 모든 DB는 data/ 한 폴더에만 둔다. 시청이력은 가공 완료본을
+# 월별 파일(시청_YYYY_MM.db)로, 콘텐츠 통계/직원 목록/대화 기록은 각각 파일 하나로.
+DATA_DIR = os.path.join(base_dir, 'data')
+DB_PATH = os.path.join(DATA_DIR, '대화기록.db')
+CONTENT_DB_PATH = os.path.join(DATA_DIR, '콘텐츠통계.db')
+EMPLOYEE_DB_PATH = os.path.join(DATA_DIR, '직원목록.db')
 
 TARGET_CONDITION_FIELDS = [
     "성별", "나이대", "나이최소", "나이최대", "SO",
