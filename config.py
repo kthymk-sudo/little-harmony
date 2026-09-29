@@ -106,13 +106,6 @@ def init_session_state():
             st.session_state[k] = v
     if 'active_feature' not in st.session_state:
         st.session_state.active_feature = 'targeting'  # 'targeting' | 'analysis' | 'report'
-    # 🌟 [시청기간 설정] 대화 상태와 별개로 세션 전체에서 유지되는 데이터 범위 설정.
-    # '새 대화'를 시작해도 초기화되지 않도록 _fresh_conversation_state()가 아닌
-    # 별도 블록에서 최초 1회만 기본값을 넣는다.
-    if 'use_period_filter' not in st.session_state:
-        st.session_state.use_period_filter = False
-        st.session_state.period_start = None
-        st.session_state.period_end = None
 
 
 def start_new_conversation():

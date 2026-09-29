@@ -33,8 +33,6 @@ def render_chat_app(profile_df, db_audience=None):
 
     st.title("레T-고객 타겟팅&카소 자동화")
     st.caption("시청 데이터를 바탕으로 AI와 대화하며 앱푸시 타겟을 정하고, 근거를 확인하고, 카피까지 작성하세요.")
-    if st.session_state.get('period_start') or st.session_state.get('period_end'):
-        st.caption(f"📅 적용 중인 시청기간: {st.session_state.get('period_start')} ~ {st.session_state.get('period_end')}")
 
     if not st.session_state.messages:
         greeting = (

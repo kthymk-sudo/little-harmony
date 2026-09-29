@@ -1,5 +1,4 @@
 # ui/sidebar.py
-import datetime
 import streamlit as st
 from config import (
     start_new_conversation, load_conversation_into_session,
@@ -125,22 +124,9 @@ def render_sidebar():
                             handler["start_new"]()
                         st.rerun()
 
-        st.divider()
-        with st.expander("📅 시청기간 설정"):
-            use_period = st.checkbox("특정 기간만 집계", value=st.session_state.get('use_period_filter', False))
-            st.session_state.use_period_filter = use_period
-            if use_period:
-                col1, col2 = st.columns(2)
-                with col1:
-                    start = st.date_input("시작일", value=st.session_state.get('period_start') or datetime.date.today().replace(day=1))
-                with col2:
-                    end = st.date_input("종료일", value=st.session_state.get('period_end') or datetime.date.today())
-                st.session_state.period_start = start
-                st.session_state.period_end = end
-            else:
-                st.session_state.period_start = None
-                st.session_state.period_end = None
-
+        # 🌟 [대화로 기간 설정] 사이드바 시청기간 설정은 없앴다 - 분석/보고서는 대화에서 말한
+        # 기간이 분석 스펙("기간")에 담겨 그 집계에만 적용된다(7월 대비 8월처럼 기간을 넘나드는
+        # 비교가 가능). 타겟팅은 적재된 전체 기간을 쓰고, 최근성은 대화 조건(최근시청일이후)으로 좁힌다.
         st.divider()
         with st.expander("📂 데이터 업로드"):
             render_upload_panel()

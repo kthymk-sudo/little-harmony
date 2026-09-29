@@ -39,15 +39,10 @@ if not has_history_data():
     st.stop()
 
 data_version = get_data_version()
-period_start = st.session_state.get('period_start')
-period_end = st.session_state.get('period_end')
-
-db_audience = load_history_period(period_start, period_end)
-
-# 🌟 db_audience 자체가 기간에 따라 달라지므로(전체 vs 특정 기간), build_audience_profile의
-# 캐시 키에도 데이터 버전뿐 아니라 기간을 함께 넣어야 서로 다른 기간 결과가 뒤섞이지 않는다.
-period_version = f"{data_version}_{period_start}_{period_end}"
-profile_df = build_audience_profile(db_audience, version=period_version)
+# 🌟 [대화로 기간 설정] 사이드바 시청기간 설정을 없앴다 - 항상 적재된 전체 기간을 불러오고,
+# 분석/보고서는 대화에서 정한 기간(분석 스펙의 "기간")을 그 집계에만 적용한다.
+db_audience = load_history_period()
+profile_df = build_audience_profile(db_audience, version=data_version)
 
 if st.session_state.active_feature == 'analysis':
     render_analysis_chat(profile_df, db_audience, load_content())

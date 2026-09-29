@@ -63,9 +63,72 @@ _CONTENT_VALUE_SPECS = {
     '콘텐츠수': {'col': '콘텐츠ID', 'aggs': {'고유값수': 'nunique'}, 'default_agg': '고유값수', 'divide': 1, 'unit': '개'},
 }
 _BASIS_LABELS = {
-    '시청': '시청이력 기준 (당사 직원 제외 · 선택한 시청기간)',
+    '시청': '시청이력 기준 (당사 직원 제외 · {기간})',
     '콘텐츠': '콘텐츠 통계 누적값 기준 (전체 기간 · 직원 시청 포함 · 삭제 콘텐츠 제외)',
 }
+# 🌟 [목적별 그래프] AI가 분석 목적에 맞게 고른다(프롬프트 참고). 조건이 안 맞으면 막대로 되돌린다.
+CHART_TYPES = ('막대', '가로막대', '선', '누적막대', '히트맵', '증감')
+
+
+def _period_bounds(period):
+    """대화에서 정한 기간 {"시작": "2026-07-01" 또는 "2026-07", "종료": ...} -> ('2026-07-01', '2026-08-31').
+    월만 오면 시작은 1일, 종료는 말일로. 해석할 수 없는 값은 None(그쪽 제한 없음)."""
+    if not isinstance(period, dict):
+        return None, None
+
+    def _parse(val, is_end):
+        text = str(val or '').strip()
+        if not text:
+            return None
+        if re.fullmatch(r'\d{4}-\d{1,2}', text):
+            month = pd.Period(text, freq='M')
+            return (month.end_time if is_end else month.start_time).strftime('%Y-%m-%d')
+        day = pd.to_datetime(text, errors='coerce')
+        return None if pd.isna(day) else day.strftime('%Y-%m-%d')
+
+    return _parse(period.get('시작'), False), _parse(period.get('종료'), True)
+
+
+def data_period_str(db_audience):
+    """AI가 "7월", "최근 3개월" 같은 말을 실제 날짜로 바꿀 수 있게 적재된 기간을 알려준다."""
+    if db_audience is None or db_audience.empty or '시청일' not in db_audience.columns:
+        return ""
+    return (f"- 적재된 시청 데이터 기간: {db_audience['시청일'].min()} ~ {db_audience['시청일'].max()} "
+            f"(기간을 정할 때는 이 범위 안에서)")
+
+
+def _match_label(text, available):
+    """증감의 기준/비교 값을 실제 열 값과 맞춘다. "2026-07"은 그대로, "7월"처럼 오면 "YYYY-07"을 찾는다."""
+    text = str(text or '').strip()
+    if text in available:
+        return text
+    month = re.search(r'(\d{1,2})\s*월', text)
+    if month:
+        hits = [a for a in available if re.fullmatch(rf'\d{{4}}-0?{int(month.group(1))}', str(a))]
+        return hits[0] if len(hits) == 1 else None
+    return None
+
+
+def _add_change_columns(flat, change, col_cols, series, labels, value_keys, value_specs, agg_label):
+    """🌟 [증감 비교] 열(1개)의 두 값(예: 2026-07 → 2026-08) 사이 증감을 행마다 계산해 컬럼으로 붙인다.
+    건수/합계류는 증감률(%)도 함께, 평균/비율류는 %p 차이만(비율의 증감률은 오해를 부름)."""
+    if not isinstance(change, dict) or len(col_cols) != 1:
+        return None
+    info = {'측정값': {}}
+    for m in value_keys:
+        by_label = {labels[n]: n for n in series[m]}
+        base, comp = _match_label(change.get('기준'), by_label), _match_label(change.get('비교'), by_label)
+        if not base or not comp or base == comp:
+            continue
+        b, c = pd.to_numeric(flat[by_label[base]]), pd.to_numeric(flat[by_label[comp]])
+        diff_col, rate_col = f"증감 ({m})", None
+        flat[diff_col] = (c - b).round(1)
+        if _measure_is_share(value_specs[m], agg_label):
+            rate_col = f"증감률% ({m})"
+            flat[rate_col] = ((c - b) / b.where(b != 0) * 100).round(1)
+        info.update({'기준': base, '비교': comp})
+        info['측정값'][m] = {'기준': by_label[base], '비교': by_label[comp], '증감': diff_col, '증감률': rate_col}
+    return info if info['측정값'] else None
 
 
 def _add_derived_columns(df):
@@ -192,17 +255,25 @@ def run_pivot_analysis(db_audience, profile_df, spec, db_content=None):
     value_keys = [k for k in _as_fields(spec.get('측정값'), _MAX_VALUES) if k in value_specs]
     if not row_fields or not value_keys:
         return None
-    empty_result = {'분석대상': target, '데이터기준': _BASIS_LABELS[target], '행': row_fields, '열': col_fields,
-                    '측정값': value_keys, '전체행수': 0, '결과': []}
+    start, end = _period_bounds(spec.get('기간')) if target == '시청' else (None, None)
+    period_text = f"{start or '처음'} ~ {end or '마지막'}" if (start or end) else "전체 기간"
+    empty_result = {'분석대상': target, '데이터기준': _BASIS_LABELS[target].format(기간=period_text),
+                    '행': row_fields, '열': col_fields, '측정값': value_keys, '기간': [start, end],
+                    '전체행수': 0, '결과': []}
 
     if target == '콘텐츠':
-        # 누적 통계는 시청자 단위 필터조건(성별/나이대 등)을 적용할 수 없는 데이터라 무시한다
+        # 누적 통계는 시청자 단위 필터조건(성별/나이대 등)이나 기간을 적용할 수 없는 데이터라 무시한다
         df = db_content
         if df is None or df.empty:
             return empty_result
         df = df[~_is_deleted(df)]
     else:
         df = _filtered_audience(db_audience, profile_df, spec.get('필터조건'))
+        # 🌟 [대화로 기간 설정] 대화에서 정한 기간은 이 집계에만 적용한다('YYYY-MM-DD' 문자열 비교)
+        if df is not None and start:
+            df = df[df['시청일'] >= start]
+        if df is not None and end:
+            df = df[df['시청일'] <= end]
         if df is None or df.empty:
             return empty_result
         df = _with_content_attrs(df, db_content)
@@ -243,15 +314,19 @@ def run_pivot_analysis(db_audience, profile_df, spec, db_content=None):
 
     flat = pd.concat(frames, axis=1)
     flat[share_cols] = flat[share_cols].fillna(0)  # 평균/비율류의 빈 칸은 빈 값 그대로
+    change = _add_change_columns(flat, spec.get('증감'), col_cols, series, labels, value_keys, value_specs, agg_label)
     flat = flat.astype(object).where(flat.notna(), None).reset_index()  # 빈 값은 JSON 저장 가능한 None으로
     flat.columns = [str(c) for c in flat.columns]
     row_col_names = [str(c) for c in row_cols]
     # 시청일(YYYY-MM-DD)/월·등록월(YYYY-MM)/시청시작시(00시~23시)는 문자열 정렬이 곧 시간순이다.
     flat = flat.sort_values(row_col_names, kind='mergesort').reset_index(drop=True)
 
+    chart_type = spec.get('차트유형') if spec.get('차트유형') in CHART_TYPES else '막대'
+    if chart_type == '증감' and not change:
+        chart_type = '막대'  # 증감을 계산할 수 없는 스펙(열이 없거나 기준/비교 값이 없음)
     return {
         **empty_result,
-        '단위': units, '차트유형': '선' if spec.get('차트유형') == '선' else '막대',
+        '단위': units, '차트유형': chart_type, '증감': change,
         '행컬럼': row_col_names, '계열': series, '계열라벨': labels,
         '전체행수': len(flat), '결과': flat.to_dict('records'),
     }
@@ -314,7 +389,7 @@ def build_comparison(db_audience, profile_df, spec, db_content=None):
     target = _target_of(spec)
     value_specs = _CONTENT_VALUE_SPECS if target == '콘텐츠' else _VIEW_VALUE_SPECS
     agg_label = (spec.get('집계방식') or '').strip()
-    base = {**spec, '열': []}
+    base = {**spec, '열': [], '증감': None}  # 기간은 그대로 둬서 전체도 같은 기간으로 비교한다
     seg = run_pivot_analysis(db_audience, profile_df, base, db_content)
     if not seg or not seg.get('결과'):
         return None
@@ -390,8 +465,8 @@ _RECENT_TURNS_FOR_INSIGHT = 6
 
 
 def chart_spec_from(data, chart_type=None):
-    """집계 결과(data)로 화면용 chart_spec을 만든다. chart_type이 오면 막대/선만 바꾼다."""
-    if chart_type in ('막대', '선'):
+    """집계 결과(data)로 화면용 chart_spec을 만든다. chart_type이 오면 그래프 종류만 바꾼다."""
+    if chart_type in CHART_TYPES and not (chart_type == '증감' and not data.get('증감')):
         data = {**data, '차트유형': chart_type}
     return {"type": "pivot", "data": data}
 
@@ -401,7 +476,8 @@ def _spec_core(spec):
     return (
         _target_of(spec), tuple(_as_fields(spec.get('행'), _MAX_ROWS)), tuple(_as_fields(spec.get('열'), _MAX_COLS)),
         tuple(_as_fields(spec.get('측정값'), _MAX_VALUES)), (spec.get('집계방식') or '').strip(),
-        str(spec.get('필터조건') or {}),
+        str(spec.get('필터조건') or {}), _period_bounds(spec.get('기간')),
+        str({k: v for k, v in (spec.get('증감') or {}).items() if v}),
     )
 
 
@@ -452,7 +528,7 @@ def process_analysis_turn(messages, user_text, profile_df, db_audience=None, db_
     - "그래프로 만들어줘": 직전과 같은 집계면 다시 계산하지 않고 직전 결과로 그래프를 붙인다.
     - "전체랑 비교해서 피드백해줘": 직전(또는 새로 지정한) 집계를 전체와 비교한 미시/거시 피드백."""
     history_with_user = messages + [{"role": "user", "text": user_text}]
-    profile_context_str = summarize_profile_context(profile_df)
+    profile_context_str = f"{summarize_profile_context(profile_df)}\n{data_period_str(db_audience)}"
 
     ai_raw = generate_analysis_chat_reply(_history_for_ai(history_with_user), profile_context_str)
     reply_text, spec = parse_target_conditions(ai_raw)
@@ -545,6 +621,23 @@ if __name__ == "__main__":
     assert describe_pivot(multi) == "채널명·영상명별 시청건수, 시청자수 (성별 비교)"
     old = {'행': '채널명', '열': '', '측정값': '시청건수', '단위': '건', '행컬럼': '채널명', '계열컬럼': ['시청건수']}
     assert normalize_pivot_result(old)['계열'] == {'시청건수': ['시청건수']}, "예전 형식 대화도 읽힌다"
+
+    # 기간 + 증감: SO별 7월 대비 8월 시청자수(MAU)
+    mau = pd.DataFrame({
+        'R고객번호': ['1', '2', '3', '1', '4', '5', '6'], '콘텐츠ID': ['a'] * 7, '시청자SO': ['P', 'P', 'Q', 'P', 'P', 'Q', 'R'],
+        '시청 유지율': [10.0] * 7, '시청일': ['2026-06-30', '2026-07-05', '2026-07-09', '2026-08-01', '2026-08-02', '2026-08-31', '2026-09-01'],
+    })
+    ch = run_pivot_analysis(mau, None, {
+        '행': 'SO', '열': '월', '측정값': ['시청자수', '시청유지율'], '기간': {'시작': '2026-07', '종료': '2026-08'},
+        '증감': {'기준': '7월', '비교': '2026-08'}, '차트유형': '증감'}, None)
+    by_so = {r['시청자SO']: r for r in ch['결과']}
+    assert ch['기간'] == ['2026-07-01', '2026-08-31'] and '2026-07-01 ~ 2026-08-31' in ch['데이터기준']
+    assert by_so['P']['증감 (시청자수)'] == 1 and by_so['P']['증감률% (시청자수)'] == 100.0, "P: 7월 1명(2번) → 8월 2명(1,4번)"
+    assert by_so['Q']['증감 (시청자수)'] == 0 and 'R' not in by_so, "6/30·9/1 기록은 기간 밖"
+    assert ch['증감']['측정값']['시청유지율']['증감률'] is None, "비율류는 증감률 없이 %p 차이만"
+    assert ch['차트유형'] == '증감' and _spec_core({'기간': {'시작': '2026-07'}}) != _spec_core({})
+    no_change = run_pivot_analysis(mau, None, {'행': 'SO', '측정값': '시청자수', '차트유형': '증감'}, None)
+    assert no_change['차트유형'] == '막대' and no_change['증감'] is None, "증감 불가면 막대로"
 
     # 전체 비교: 여성(1,3번 고객) vs 전체
     cmp_ = build_comparison(views, profile, {'행': '채널명', '측정값': ['시청건수', '시청유지율'], '필터조건': {'성별': '여자'}}, content)

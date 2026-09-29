@@ -8,7 +8,7 @@
 # ============================================================
 from ai_engine.gemini_api import generate_report_reply, generate_pivot_insight_reply, is_api_error
 from database.db_manager import summarize_profile_context
-from services.analysis_service import run_pivot_analysis, insight_spec_str, insight_rows_str
+from services.analysis_service import run_pivot_analysis, insight_spec_str, insight_rows_str, data_period_str
 from utils.response_parser import parse_target_conditions
 
 
@@ -16,7 +16,7 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
     """반환: (new_messages, chart_spec). chart_spec은 데이터 요청이 없었거나
     계산 결과가 비었으면 None."""
     history_with_user = messages + [{"role": "user", "text": user_text}]
-    profile_context_str = summarize_profile_context(profile_df)
+    profile_context_str = f"{summarize_profile_context(profile_df)}\n{data_period_str(db_audience)}"
 
     ai_raw = generate_report_reply(history_with_user, profile_context_str)
     reply_text, parsed = parse_target_conditions(ai_raw)
