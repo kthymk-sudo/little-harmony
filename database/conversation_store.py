@@ -52,6 +52,8 @@ def make_conversation_title(first_user_text, feature='targeting'):
 
 
 def save_conversation(conv_id, title, phase, messages, conditions, stats, member_ids, reasoning, push_copy, feature='targeting'):
+    """반환: 저장 성공 여부. 🌟 [버그 수정] 예전에는 실패해도 아무 표시 없이 넘어갔고, DB 오류가 아닌
+    실패(예: 저장할 수 없는 값)는 화면 전체를 멈추게 했다 - 이제 실패는 False로 알려 호출부가 경고한다."""
     try:
         conn = _connect()
         cursor = conn.cursor()
@@ -81,8 +83,9 @@ def save_conversation(conv_id, title, phase, messages, conditions, stats, member
         )
         conn.commit()
         conn.close()
-    except sqlite3.Error:
-        pass
+        return True
+    except (sqlite3.Error, TypeError, ValueError):  # DB 오류 + JSON으로 저장할 수 없는 값
+        return False
 
 
 def rename_conversation(conv_id, new_title):

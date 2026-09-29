@@ -19,13 +19,14 @@ from ui.chat_styles import inject_chat_css, render_message
 
 def _autosave():
     first_user_text = next((m['text'] for m in st.session_state.analysis_messages if m['role'] == 'user'), "")
-    save_conversation(
+    if not save_conversation(
         conv_id=st.session_state.analysis_current_conversation_id,
         title=make_conversation_title(first_user_text, feature='analysis'),
         phase='', messages=st.session_state.analysis_messages,
         conditions={}, stats={}, member_ids=[], reasoning="", push_copy="",
         feature='analysis',
-    )
+    ):
+        st.session_state.save_failed = True  # main.py가 다음 화면에서 경고를 띄운다
 
 
 def _render_steps(steps, checks):
@@ -101,11 +102,15 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
             def _on_step(number, description):
                 status.update(label=f"{number}단계 계산 중 · {description}")
 
-            tables = build_tables(db_audience, db_content, profile_df)
-            reply = run_analyst_turn(
-                st.session_state.analysis_messages[:-1], pending, tables, on_step=_on_step, feedback=feedback,
-            )
-            status.update(label="분석 완료", state="complete")
+            try:
+                tables = build_tables(db_audience, db_content, profile_df)
+                reply = run_analyst_turn(
+                    st.session_state.analysis_messages[:-1], pending, tables, on_step=_on_step, feedback=feedback,
+                )
+                status.update(label="분석 완료", state="complete")
+            except Exception as e:  # 예상 못한 오류가 나도 질문에 답이 남도록(화면 전체가 멈추지 않게)
+                reply = {"role": "assistant", "text": f"⚠️ 분석 중 오류가 생겼어요. 질문을 조금 바꿔서 다시 시도해주세요. ({type(e).__name__})"}
+                status.update(label="분석 중 오류", state="error")
         st.session_state.analysis_messages.append(reply)
         st.session_state.analysis_stream_next = True
         _autosave()

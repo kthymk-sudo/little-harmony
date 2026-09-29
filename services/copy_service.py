@@ -1,20 +1,58 @@
 # services/copy_service.py
 # ============================================================
 # 🌟 [모듈화] ui/chat_app.py에서 "카피 작성 대화 한 턴 처리" 순수 로직만 분리.
+#
+# 🌟 [버그 수정 - 실패 문구가 카피로 저장] AI 호출이 실패하면 "⚠️ ..." 안내 문구가 카피처럼
+# 저장되고 작성 버튼도 비활성화돼 다시 만들기 어려웠다. 실패면 카피 없이(None) 돌려준다.
+# 🌟 [글자수 확인] 제목/본문 글자수 제한을 AI가 넘겨도 알 수 없었다 - 버전별 글자수를 계산해
+# 답변 아래에 붙인다(넘으면 ⚠️).
 # ============================================================
-from ai_engine.gemini_api import generate_ai_push_copy
+import re
+from ai_engine.gemini_api import generate_ai_push_copy, is_api_error
+from config import PUSH_TITLE_MAX_LEN, PUSH_BODY_MAX_LEN, SMS_TITLE_MAX_LEN, SMS_BODY_MAX_LEN
 from utils.response_parser import format_push_copy_for_display
 
 COPY_TYPE_LABELS = {'push': '📱 앱푸시 카피', 'sms': '✉️ SMS 문자 카피'}
+_LIMITS = {'push': (PUSH_TITLE_MAX_LEN, PUSH_BODY_MAX_LEN), 'sms': (SMS_TITLE_MAX_LEN, SMS_BODY_MAX_LEN)}
+_VERSION = re.compile(r'\[버전\s*(\d+)[^\]]*\]\s*■\s*제목\s*:\s*(.*?)\s*■\s*내용\s*:\s*(.*?)(?=\n\s*\[버전|\Z)', re.S)
+
+
+def length_report(copy_text, copy_type='push'):
+    """버전별 제목/본문 글자수(공백 포함)와 제한 초과 여부. 형식을 못 읽으면 빈 문자열."""
+    title_max, body_max = _LIMITS.get(copy_type, _LIMITS['push'])
+    lines = []
+    for number, title, body in _VERSION.findall(copy_text or ""):
+        t_len, b_len = len(title.strip()), len(body.strip())
+        over = t_len > title_max or b_len > body_max
+        lines.append(f"{'⚠️' if over else '✅'} 버전 {number}: 제목 {t_len}/{title_max}자 · 본문 {b_len}/{body_max}자"
+                     + (" - 제한 초과, 줄여달라고 요청해 주세요" if over else ""))
+    return "\n".join(lines)
 
 
 def process_copy_turn(messages, target_summary_str, reasoning, user_text, copy_type='push'):
     """카피 작성 대화 한 턴 처리 (Streamlit 비의존 - 단위 테스트 가능).
-    copy_type: 'push'(앱푸시) 또는 'sms'(문자) - 어떤 형식/글자수 제약으로 만들지 결정."""
+    copy_type: 'push'(앱푸시) 또는 'sms'(문자) - 어떤 형식/글자수 제약으로 만들지 결정.
+    반환: (new_messages, copy_text) - AI 호출이 실패하면 copy_text는 None."""
     raw = generate_ai_push_copy(target_summary_str, reasoning, user_text or "", copy_type=copy_type)
+    new_messages = messages + ([{"role": "user", "text": user_text}] if user_text else [])
+    if is_api_error(raw):
+        return new_messages + [{"role": "assistant", "text": raw}], None
     copy_text = format_push_copy_for_display(raw)
     label = COPY_TYPE_LABELS.get(copy_type, COPY_TYPE_LABELS['push'])
-    labeled_text = f"**[{label}]**\n\n{copy_text}"
-    new_messages = messages + ([{"role": "user", "text": user_text}] if user_text else [])
-    new_messages = new_messages + [{"role": "assistant", "text": labeled_text}]
-    return new_messages, copy_text
+    report = length_report(copy_text, copy_type)
+    labeled_text = f"[{label}]\n\n{copy_text}" + (f"\n\n📏 글자수 확인\n{report}" if report else "")
+    return new_messages + [{"role": "assistant", "text": labeled_text}], copy_text
+
+
+if __name__ == "__main__":
+    sample = ("[버전 1: 호기심 유발형]\n■ 제목: 오늘 저녁엔 뭐 볼까요?\n■ 내용: 좋아하시는 트로트 무대가 새로 올라왔어요\n\n"
+              "[버전 2: 혜택 강조형]\n■ 제목: 이번 주 새로 올라온 트로트 무대와 노래교실을 한 번에 모아보기\n■ 내용: 짧게\n")
+    report = length_report(sample, 'push')
+    assert report.splitlines()[0].startswith("✅ 버전 1: 제목 13/30자") and "⚠️ 버전 2" in report, report
+    globals()['generate_ai_push_copy'] = lambda *a, **k: "⚠️ [서버 과부하] 잠시 후 다시"
+    msgs, copy = process_copy_turn([], "요약", "근거", "")
+    assert copy is None and msgs[-1]['text'].startswith("⚠️"), "실패는 카피로 저장하지 않는다"
+    globals()['generate_ai_push_copy'] = lambda *a, **k: sample
+    msgs, copy = process_copy_turn([], "요약", "근거", "더 짧게")
+    assert copy == sample.strip() and msgs[-1]['text'].startswith("[📱 앱푸시 카피]") and '**' not in msgs[-1]['text']
+    print("copy_service self-check OK")

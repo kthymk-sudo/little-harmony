@@ -27,7 +27,7 @@ def autosave():
         if st.session_state.target_result_df is not None else []
     )
     first_user_text = next((m['text'] for m in st.session_state.messages if m['role'] == 'user'), "")
-    save_conversation(
+    saved = save_conversation(
         conv_id=st.session_state.current_conversation_id,
         title=make_conversation_title(first_user_text),
         phase=st.session_state.phase,
@@ -38,6 +38,8 @@ def autosave():
         reasoning=st.session_state.target_reasoning,
         push_copy=st.session_state.push_copy_result,
     )
+    if not saved:
+        st.session_state.save_failed = True  # main.py가 다음 화면에서 경고를 띄운다
 
 
 def render_target_card():

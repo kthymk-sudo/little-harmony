@@ -7,8 +7,11 @@
 # render_message()만 가져다 쓴다.
 # ============================================================
 import html as html_lib
+import math
 import time
 import streamlit as st
+
+_MAX_TYPING_SEC = 2.5  # 타이핑 효과 최대 시간(긴 답변도 이 안에 끝남)
 
 
 # 🌟 [UI 리디자인] 브랜드 컬러(#2563EB, .streamlit/config.toml의 primaryColor와 동일)를
@@ -192,7 +195,9 @@ def render_message(role, text, animate=False, delay=0.02, chunk_size=2):
     placeholder = st.empty()
     accumulated = ""
 
-    # 글자 길이에 상관없이 무조건 2글자씩 일정한 속도로 타다닥 타이핑합니다.
+    # 짧은 답변은 2글자씩 일정한 속도로 타이핑하고, 긴 답변(분석 결과 등 1,000자 이상)은 한 번에
+    # 찍는 글자 수만 늘려 전체가 약 _MAX_TYPING_SEC 안에 끝나게 한다(2글자씩이면 1,500자에 15초).
+    chunk_size = max(chunk_size, math.ceil(len(text) / (_MAX_TYPING_SEC / delay)))
     for i in range(0, len(text), chunk_size):
         accumulated += text[i:i + chunk_size]
         placeholder.markdown(_bubble_html(role, accumulated), unsafe_allow_html=True)

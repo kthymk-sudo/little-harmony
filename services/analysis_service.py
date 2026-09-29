@@ -40,13 +40,6 @@ def _region_sort_key(series):
     return series.map(lambda v: (_REGION_ORDER.index(v), '') if v in _REGION_ORDER else (len(_REGION_ORDER), str(v)))
 
 
-def _expand_so_regions(conditions):
-    """필터조건의 SO에 권역 이름("대전")이 오면 그 권역의 실제 SO 이름들로 펼친다."""
-    if not conditions or not conditions.get('SO'):
-        return conditions
-    values = conditions['SO'] if isinstance(conditions['SO'], list) else [conditions['SO']]
-    expanded = [so for v in values for so in SO_REGIONS.get(str(v).strip(), [v])]
-    return {**conditions, 'SO': expanded}
 # 🌟 [다중 행/열/값] 표와 그래프가 읽을 수 없을 만큼 커지지 않도록 개수 상한을 둔다
 _MAX_ROWS, _MAX_COLS, _MAX_VALUES = 2, 2, 3
 _CONTENT_ATTR_COLS = ['업로더 구분', '업로더SO', '제작자', '가격유형', '등록일', '삭제 여부']
@@ -186,7 +179,7 @@ def _with_content_attrs(df, db_content):
 def _filtered_audience(db_audience, profile_df, conditions):
     if not conditions or profile_df is None or profile_df.empty:
         return db_audience
-    matched = _filter_by_conditions(profile_df.copy(), _expand_so_regions(conditions), db_audience)
+    matched = _filter_by_conditions(profile_df.copy(), conditions, db_audience)  # 권역 이름("대전")도 여기서 처리
     matched_ids = set(matched['R고객번호'].astype(str).unique().tolist())
     return db_audience[db_audience['R고객번호'].astype(str).isin(matched_ids)]
 

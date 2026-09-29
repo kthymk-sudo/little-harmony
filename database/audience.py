@@ -7,7 +7,23 @@ import re
 import numpy as np
 import pandas as pd
 import streamlit as st
-from config import ACTIVE_SEGMENT_DAYS, DORMANT_SEGMENT_DAYS
+from config import ACTIVE_SEGMENT_DAYS, DORMANT_SEGMENT_DAYS, SO_REGIONS
+
+# 🌟 [버그 수정 - 조건 표기 불일치] 데이터의 성별 값은 "남자"/"여자"인데, AI나 실무자가
+# "여", "여성"처럼 쓰면 정확 일치 비교라 대상자가 0명이 됐다. 흔한 표기를 데이터 값으로 맞춘다.
+_GENDER_ALIASES = {'여': '여자', '여성': '여자', 'f': '여자', 'female': '여자',
+                   '남': '남자', '남성': '남자', 'm': '남자', 'male': '남자'}
+_SO_TO_REGION = {so: region for region, sos in SO_REGIONS.items() for so in sos}
+
+
+def _normalize_genders(values):
+    return [_GENDER_ALIASES.get(str(v).strip().lower(), str(v).strip()) for v in values]
+
+
+def expand_so_regions(values):
+    """🌟 [SO 권역] "대전"처럼 권역 이름이 오면 그 권역의 실제 SO들로 펼친다(실제 SO 이름은 그대로).
+    SO 권역 구성은 config.SO_REGIONS 한 곳에서 관리한다."""
+    return [so for v in values for so in SO_REGIONS.get(str(v).strip(), [v])]
 
 # 🌟 [취향 다각도 분석] 선호장르/선호채널/선호메뉴/선호시청시간대를 "1위 하나"가
 # 아니라 "1위와 충분히 근접한 항목 전부"로 잡기 위한 기준값. RATIO는 1위 시청
@@ -175,7 +191,8 @@ def summarize_profile_context(profile_df):
     lines = [
         f"- 전체 시청자 수: {len(profile_df)}명",
         f"- 성별 분포: {gender_counts}",
-        f"- SO(지역) 목록: {so_list}",
+        f"- SO(지역): 보통 8개 권역 {list(SO_REGIONS)}으로 말한다 - 조건에 권역 이름을 그대로 써도 된다"
+        f"(권역 안 세부 SO가 필요할 때만 세부 이름 사용). 세부 SO 목록: {so_list}",
         f"- 선호 장르 목록: {genre_list}",
         f"- 선호 시청시간대 목록: {time_list}",
         f"- 선호 채널 목록: {channel_list}",
@@ -404,7 +421,7 @@ def _filter_by_conditions(profile_df, conditions, db_audience=None):
     df = profile_df
 
     if conditions.get('성별'):
-        df = df[df['성별'].isin(_as_list(conditions['성별']))]
+        df = df[df['성별'].isin(_normalize_genders(_as_list(conditions['성별'])))]
     if conditions.get('나이대'):
         age_band = (pd.to_numeric(df['나이'], errors='coerce') // 10 * 10).astype('Int64').astype(str) + '대'
         df = df[age_band.isin(_as_list(conditions['나이대']))]
@@ -415,7 +432,7 @@ def _filter_by_conditions(profile_df, conditions, db_audience=None):
     if max_age is not None:
         df = df[pd.to_numeric(df['나이'], errors='coerce') <= max_age]
     if conditions.get('SO'):
-        df = df[df['시청자SO'].isin(_as_list(conditions['SO']))]
+        df = df[df['시청자SO'].isin(expand_so_regions(_as_list(conditions['SO'])))]
     # 🌟 [취향 다각도 분석] 선호장르/선호시청시간대/선호채널/선호메뉴는 이제 고객별로
     # 여러 값을 담는 리스트 컬럼이라(_pref_list_by_customer), .isin() 대신
     # "겹치는 게 있는지"를 보는 _series_intersects()로 필터링한다.
@@ -594,7 +611,7 @@ def format_content_ranking_reply(ranking):
 # 받으면 존재하지 않는 컬럼 요청 등으로 깨지기 쉬움), '나이대'처럼 실제 컬럼이 아닌
 # 계산이 필요한 필드는 별도 처리한다.
 _GROUPABLE_FIELD_COLUMNS = {
-    '성별': '성별', 'SO': '시청자SO', '활동세그먼트': '활동세그먼트',
+    '성별': '성별', 'SO세부': '시청자SO', '활동세그먼트': '활동세그먼트',
     '선호장르': '선호장르', '선호채널': '선호채널', '선호메뉴': '선호메뉴',
     '선호시청시간대': '선호시청시간대',
 }
@@ -612,6 +629,8 @@ def _groupable_series(df, group_field):
         age_num = pd.to_numeric(df['나이'], errors='coerce')
         band = (age_num // 10 * 10).astype('Int64').astype(str) + '대'
         return band.where(age_num.notna())
+    if group_field == 'SO' and '시청자SO' in df.columns:  # SO별은 기본적으로 8개 권역으로 묶어서
+        return df['시청자SO'].map(lambda v: _SO_TO_REGION.get(v, v))
     col = _GROUPABLE_FIELD_COLUMNS.get(group_field)
     if col is None or col not in df.columns:
         return None

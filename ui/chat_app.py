@@ -66,13 +66,15 @@ def render_chat_app(profile_df, db_audience=None):
                 st.session_state.target_reasoning, "", copy_type=copy_type,
             )
         st.session_state.messages = new_messages
-        st.session_state.push_copy_result = copy_text
-        st.session_state.last_copy_type = copy_type
-        if copy_type == 'push':
-            st.session_state.push_copy_generated = True
-        else:
-            st.session_state.sms_copy_generated = True
-        st.session_state.phase = 'copywriting'
+        # 🌟 [버그 수정] 생성에 실패하면(copy_text=None) 카피로 저장하지 않고 버튼도 다시 누를 수 있게 둔다
+        if copy_text is not None:
+            st.session_state.push_copy_result = copy_text
+            st.session_state.last_copy_type = copy_type
+            if copy_type == 'push':
+                st.session_state.push_copy_generated = True
+            else:
+                st.session_state.sms_copy_generated = True
+            st.session_state.phase = 'copywriting'
         st.session_state.stream_next = True
         autosave()
         st.rerun()
@@ -87,7 +89,8 @@ def render_chat_app(profile_df, db_audience=None):
                     copy_type=st.session_state.get('last_copy_type', 'push'),
                 )
                 st.session_state.messages = new_messages
-                st.session_state.push_copy_result = copy_text
+                if copy_text is not None:  # 실패하면 직전 카피를 그대로 둔다
+                    st.session_state.push_copy_result = copy_text
             else:
                 new_messages, new_conditions = process_target_turn(
                     st.session_state.messages[:-1], st.session_state.target_conditions, pending, profile_df,

@@ -17,6 +17,7 @@ import builtins
 import io
 import re
 import threading
+import types
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,8 @@ _MAX_RETRIES = 3          # 형식이 틀리거나 결과를 지어낸 응답을
 _DEEP_QUESTION = re.compile(r'특이|원인|왜|이유|유입|영향|때문|요인')
 _DEEP_MIN_STEPS = 3       # 원인·특이사항 질문에 기대하는 최소 성공 계산 단계
 _MAX_NUDGES = 2           # 그래도 바로 답하려 하면 되돌려 보내는 최대 횟수
+_MAX_VERIFY_RETRIES = 2   # 실행 결과로 확인 안 되는 숫자가 있을 때 코드로 계산하게 되돌려 보내는 최대 횟수
+_TOTAL_ROW_LABELS = {'합계', '전체', '총계', '총합', '소계', 'total', 'Total', 'TOTAL', '전체 합계'}
 _TIMEOUT_SEC = 30
 _PREVIEW_ROWS = 40
 _HISTORY_TURNS = 8
@@ -85,15 +88,45 @@ _BLOCKED_NAMES = {
     'vars', 'input', 'breakpoint', 'exit', 'quit', 'help', 'dir', 'memoryview', 'type', 'object', 'super',
 }
 _BLOCKED_ATTR = re.compile(
-    r'^(_.*|to_(csv|excel|sql|pickle|parquet|hdf|feather|stata|clipboard|html|latex|markdown|json|xml|orc)'
-    r'|read_\w+|eval|query|system|popen|load|save|savetxt|tofile|fromfile|loadtxt|genfromtxt)$'
+    r'^(_.*|to_(csv|excel|sql|pickle|parquet|hdf|feather|stata|clipboard|html|latex|markdown|json|xml|orc|string)'
+    r'|read_\w+|eval|query|system|popen|load|save|savetxt|tofile|fromfile|loadtxt|genfromtxt|savefig|style|plot|dumps?'
+    r'|os|sys|io|subprocess|shutil|pathlib|builtins|importlib|ctypes|compat|core|util|lib|api|common|testing)$'
 )
 _BLOCKED_NODES = (ast.Import, ast.ImportFrom, ast.While, ast.Global, ast.Nonlocal, ast.With, ast.AsyncWith,
                   ast.AsyncFunctionDef, ast.ClassDef, ast.Try, ast.Raise)
+_MAX_RANGE = 1_000_000
+
+
+def _capped_range(*args):
+    r = range(*args)
+    if len(r) > _MAX_RANGE:
+        raise ValueError(f"range가 너무 커요({len(r):,}). 반복문 대신 pandas 집계로 계산해 주세요.")
+    return r
+
+
 _SAFE_BUILTINS = {n: getattr(builtins, n) for n in (
-    'len', 'range', 'min', 'max', 'sum', 'sorted', 'round', 'abs', 'list', 'dict', 'set', 'tuple', 'str', 'int',
+    'len', 'min', 'max', 'sum', 'sorted', 'round', 'abs', 'list', 'dict', 'set', 'tuple', 'str', 'int',
     'float', 'bool', 'enumerate', 'zip', 'isinstance', 'any', 'all', 'map', 'filter', 'reversed', 'divmod',
 )}
+_SAFE_BUILTINS['range'] = _capped_range
+
+# 🌟 [격리] pd/np 모듈을 그대로 주면 pd.io.common.os처럼 모듈 속성을 타고 os(파일 삭제 등)에 닿을 수
+# 있었다. 분석에 필요한 함수만 담은 대리 객체를 준다 - 별칭(p = pd)을 써도 없는 속성은 없다.
+_PD_ALLOWED = (
+    'DataFrame', 'Series', 'Index', 'MultiIndex', 'Categorical', 'CategoricalDtype', 'Timestamp', 'Timedelta',
+    'Period', 'NaT', 'NA', 'to_datetime', 'to_numeric', 'to_timedelta', 'date_range', 'period_range', 'merge',
+    'merge_asof', 'concat', 'cut', 'qcut', 'pivot_table', 'crosstab', 'melt', 'get_dummies', 'isna', 'isnull',
+    'notna', 'notnull', 'unique', 'factorize', 'Grouper', 'IndexSlice', 'DateOffset',
+)
+_NP_ALLOWED = (
+    'nan', 'inf', 'where', 'select', 'round', 'mean', 'median', 'sum', 'std', 'var', 'min', 'max', 'abs', 'sqrt',
+    'log', 'log1p', 'exp', 'percentile', 'quantile', 'clip', 'arange', 'linspace', 'array', 'isnan', 'isfinite',
+    'maximum', 'minimum', 'cumsum', 'diff', 'sort', 'argsort', 'unique', 'floor', 'ceil', 'int64', 'float64',
+    'divide', 'nanmean', 'nansum', 'nanmedian', 'count_nonzero', 'histogram', 'corrcoef', 'average', 'sign',
+    'zeros', 'ones', 'full', 'concatenate', 'repeat', 'tile', 'logical_and', 'logical_or', 'logical_not', 'isin',
+)
+_SAFE_PD = types.SimpleNamespace(**{n: getattr(pd, n) for n in _PD_ALLOWED})
+_SAFE_NP = types.SimpleNamespace(**{n: getattr(np, n) for n in _NP_ALLOWED})
 
 
 def check_code(code):
@@ -128,7 +161,7 @@ def run_code(code, tables, previous):
 
     namespace = {
         '__builtins__': {**_SAFE_BUILTINS, 'print': _print},
-        'pd': pd, 'np': np, 'SO권역순서': list(_REGION_ORDER), '이전결과': dict(previous),
+        'pd': _SAFE_PD, 'np': _SAFE_NP, 'SO권역순서': list(_REGION_ORDER), '이전결과': dict(previous),
         **{name: df.copy() for name, df in tables.items()},
     }
     outcome = {}
@@ -160,37 +193,26 @@ _NUMBER = re.compile(r'(?<![\w.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?')
 _PLAIN_NUMBER = re.compile(r'\d+(?:\.\d+)?')
 
 
-def _number_forms(text, pattern=_PLAIN_NUMBER):
-    """문자열 속 숫자를 비교용 형태로(쉼표 제거, 소수는 0~2자리 반올림 형태도 포함)."""
-    forms = set()
-    for token in pattern.findall(text):
-        raw = token.replace(',', '')
-        try:
-            value = float(raw)
-        except ValueError:
-            continue
-        forms.add(raw)
-        for digits in (0, 1, 2):
-            rounded = round(value, digits)
-            forms.add(f"{rounded:.{digits}f}")
-            if rounded == int(rounded):
-                forms.add(str(int(rounded)))
-    return forms
+# 실행 결과의 숫자를 사람이 흔히 바꿔 쓰는 형태: 그대로, 비율→%(×100), %→비율(÷100), 초→분(÷60), 초→시간(÷3600)
+_UNIT_TRANSFORMS = (1, 100, 0.01, 1 / 60, 1 / 3600)
+_REL_TOLERANCE = 0.001   # 반올림 차이 허용(0.1%)
+_ABS_TOLERANCE = 0.051   # 소수 첫째 자리 반올림 허용
 
 
 def ungrounded_numbers(answer, evidence):
-    """답변의 숫자 중 실행 결과(evidence)에 없는 것. 연도·월·일 같은 작은 수는 문맥상 흔해서 제외한다."""
-    known = _number_forms(evidence)
+    """답변의 숫자 중 실행 결과(evidence)에서 확인되지 않는 것.
+    반올림·% 변환·초→분/시간 변환은 확인된 것으로 본다. 연도·월·일 같은 작은 정수는 문맥상 흔해서 제외한다."""
+    values = [float(t) for t in _PLAIN_NUMBER.findall(evidence)]
+    candidates = np.unique(np.array([v * k for v in values for k in _UNIT_TRANSFORMS] or [np.nan]))
     missing = []
     for token in _NUMBER.findall(answer):
-        raw = token.replace(',', '')
-        try:
-            value = float(raw)
-        except ValueError:
+        value = float(token.replace(',', ''))
+        if value <= 31 and value.is_integer() or 2000 <= value <= 2100:
             continue
-        if value <= 31 and float(value).is_integer() or 2000 <= value <= 2100:
-            continue
-        if raw not in known and not (_number_forms(raw) & known):
+        tolerance = max(_ABS_TOLERANCE, abs(value) * _REL_TOLERANCE)
+        i = np.searchsorted(candidates, value)
+        near = candidates[max(i - 1, 0):i + 1]
+        if not np.any(np.abs(near - value) <= tolerance):
             missing.append(token)
     return missing
 
@@ -225,6 +247,10 @@ def table_to_pivot_result(value, graph):
     x = [c for c in (graph.get('x') or []) if c in df.columns][:2]
     values = [c for c in (graph.get('값') or []) if c in df.columns][:3]
     if not x or not values:
+        return None
+    # "합계/전체" 행은 다른 항목보다 훨씬 커서 막대 하나가 그래프를 덮어버린다 - 그래프에서는 뺀다
+    df = df[~df[x].astype(str).apply(lambda col: col.str.strip()).isin(_TOTAL_ROW_LABELS).any(axis=1)]
+    if df.empty:
         return None
     units = {k: v for k, v in (graph.get('단위') or {}).items() if k in values}
     chart_type = graph.get('차트유형') if graph.get('차트유형') in CHART_TYPES else '막대'
@@ -339,8 +365,9 @@ def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False):
     schema = describe_tables(tables)
     history = _history_str(messages)
     steps, values = [], {}
-    correction, retries, nudges = "", 0, 0
+    correction, retries, nudges, verify_retries = "", 0, 0, 0
     checks = []  # 답변 검증 기록(지어낸 숫자 차단 등) - "계산 과정 보기"에 같이 보여준다
+    unverified = []
     i = 0
     while i < _MAX_STEPS:
         prompt = get_code_analyst_prompt(schema, history, user_text, _steps_str(steps), i == _MAX_STEPS - 1,
@@ -352,19 +379,27 @@ def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False):
         has_code = bool(code_match) and i < _MAX_STEPS - 1
         # 코드 앞부분(할 일 설명)만 검사한다 - 코드블록 뒤에 지어낸 결과가 붙어 있어도 코드만 쓰고 나머지는 버린다
         reason = _invalid_reason(raw[:code_match.end()] if has_code else raw, has_code)
-        nudge = None  # "더 파고들어" - 무시해도 답변 자체는 믿을 수 있으므로, 횟수를 넘기면 그 답변을 받는다
+        # "다시 해봐" 요청(nudge) - 무시해도 답변을 버릴 정도는 아니므로, 정해진 횟수를 넘기면 그 답변을 받는다
+        nudge, nudge_label = None, ""
+        unverified = []
         if not has_code and not reason:
             # 🌟 최종 답변의 숫자가 실제 실행 결과(또는 이전 답변)에 있는지 대조 - 지어낸 숫자 차단
             evidence = "\n".join([s.get('preview', '') + "\n" + s.get('printed', '') for s in steps]
                                  + [m.get('text', '') for m in messages] + [user_text])
             missing = ungrounded_numbers(parse_target_conditions(_CODE_BLOCK.sub('', raw))[0], evidence)
-            if missing:
-                reason = (f"답변의 숫자 {', '.join(missing[:6])}가 실행 결과에 없어. 필요한 값은 먼저 코드로 계산해서 "
-                          f"실행 결과로 확인한 뒤, 실행 결과에 나온 숫자만 써.")
+            if missing and verify_retries < _MAX_VERIFY_RETRIES:
+                verify_retries += 1
+                nudge_label = f"확인 안 된 숫자({', '.join(missing[:6])}) → 코드로 계산하도록 다시 요청"
+                nudge = (f"답변의 숫자 {', '.join(missing[:6])}가 실행 결과에서 확인되지 않아(차이·비율·합계를 머릿속으로 "
+                         f"계산했다면 그것도 해당돼). 이 값들을 코드로 계산해 `결과`에 담아 확인해. "
+                         f"이번 응답은 최종 답변이 아니라 반드시 ```python 코드블록```이어야 해.")
+            elif missing:
+                unverified = missing  # 그래도 안 되면 답변은 보여주되, 확인 안 된 숫자를 표시한다
             elif (nudges < _MAX_NUDGES and _DEEP_QUESTION.search(user_text)
                   and sum('preview' in s for s in steps) < _DEEP_MIN_STEPS):
                 # 원인·특이사항 질문인데 너무 일찍 끝내려 하면 더 파고들게 한다
                 nudges += 1
+                nudge_label = "더 파고들도록 다시 요청"
                 nudge = ("원인·특이사항을 묻는 질문인데 근거 계산이 부족해. 전월/다른 권역/전체와 비교해 튀는 곳을 찾고, "
                          "그곳의 원인을 한 단계 더 파고드는 코드를 실행해(예: 신규 시청자가 처음 본 콘텐츠, 그 권역에서만 "
                          "유독 많이 본 콘텐츠의 전체 대비 비중). 이번 응답은 최종 답변이 아니라 반드시 ```python 코드블록```이어야 해.")
@@ -374,7 +409,7 @@ def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False):
             continue  # 같은 단계를 다시 요청(단계 수는 늘리지 않음)
         if nudge:
             correction = nudge
-            checks.append("더 파고들도록 다시 요청")
+            checks.append(nudge_label)
             continue
         correction = ""
         i += 1
@@ -400,7 +435,12 @@ def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False):
             return {'role': 'assistant', 'steps': steps, 'checks': checks,
                     'text': "계산은 했지만 답변을 믿을 수 있게 정리하지 못했어요. 아래 '계산 과정 보기'에서 실제 계산 "
                             "결과를 확인하시거나, 질문을 조금 나눠서 다시 물어봐주세요."}
-        return {**_final_message(raw, steps, values, messages), 'checks': checks}
+        message = {**_final_message(raw, steps, values, messages), 'checks': checks}
+        if unverified:
+            message['text'] += (f"\n\n⚠️ 이 답변의 숫자 중 {', '.join(unverified[:6])}은(는) 실행 결과로 확인되지 않았어요. "
+                                f"'계산 과정 보기'의 실제 결과와 대조해서 봐주세요.")
+            checks.append(f"확인 안 된 숫자 표시: {', '.join(unverified[:6])}")
+        return message
     return {'role': 'assistant', 'text': "분석을 마무리하지 못했어요. 질문을 조금 나눠서 다시 물어봐주세요.",
             'steps': steps, 'checks': checks}
 
@@ -411,7 +451,10 @@ def _final_message(raw, steps, values, messages):
     graph = spec.get('그래프') if isinstance(spec.get('그래프'), dict) else None
     if graph:
         value = values.get(graph.get('단계')) if graph.get('단계') in values else (values[max(values)] if values else None)
-        data = table_to_pivot_result(value, graph)
+        try:
+            data = table_to_pivot_result(value, graph)
+        except Exception:  # AI가 지정한 표 모양이 그래프로 바꿀 수 없는 형태면 그래프만 생략(답변은 그대로)
+            data = None
         if data:
             message['data'] = data
     if spec.get('그래프요청') is True:
@@ -443,6 +486,11 @@ if __name__ == "__main__":
                 "getattr(pd, 'eval')", "시청.query('a>1')"]:
         assert check_code(bad), bad
     assert 'error' in run_code("결과 = 1/0", tables, {})
+    # 모듈을 타고 os에 닿는 경로(점검에서 발견)가 막혔는지 - 별칭을 써도 막혀야 한다
+    for escape in ["결과 = str(pd.io.common.os)", "p = pd\n결과 = str(p.io)", "결과 = str(np.lib)",
+                   "결과 = 시청.values.dump('x')", "결과 = list(range(10**9))"]:
+        assert 'error' in run_code(escape, tables, {}), escape
+    assert run_code("결과 = pd.to_datetime(pd.Series(['2026-08-01'])).dt.month.sum() + np.sqrt(4)", tables, {})['value'] == 10
     ok = run_code("m = 시청.groupby(['월','SO권역'])['R고객번호'].nunique().reset_index(name='MAU')\nprint(len(m))\n결과 = m", tables, {})
     assert ok['printed'].strip() == '3' and 'R고객번호' not in preview(ok['value'])  # 7월 대구 시청 없음
     assert tables['시청'].shape[0] == 5, "AI 코드가 원본 표를 바꾸지 못한다"
@@ -512,9 +560,18 @@ jul, aug = m['2026-07'], m['2026-08']
     # 실행 결과에 없는 숫자를 쓰면 무효(표식 없이 숫자만 지어낸 경우), 계산한 숫자/반올림/연도·월은 통과
     assert ungrounded_numbers("대전 MAU는 1,514명", "SO권역,MAU\n대전,890") == ['1,514']
     assert ungrounded_numbers("대전 890명, 재방문율 17.5%, 2026년 8월", "대전,890,17.51") == []
+    # 반올림·%·초→분 변환은 확인된 것으로 본다(스크린샷의 "답변 폐기" 원인)
+    assert ungrounded_numbers("평균 645.67명(18.69%), 비중 12.3%, 시청 237.4분", "645.6666666,0.123,14245,18.69") == []
     replies = iter(["대전은 1,514명이에요.\n```json\n{\"그래프\": null}\n```", "5건이에요.\n```json\n{\"그래프\": null}\n```"])
     globals()['generate_code_analyst_step'] = lambda prompt: next(replies)
     assert run_analyst_turn([], "몇 건?", tables)['text'] == '5건이에요.'
+    # 계속 확인 안 되는 숫자를 쓰면 답변을 버리지 않고, 그 숫자를 표시해서 보여준다
+    globals()['generate_code_analyst_step'] = lambda prompt: "대전은 1,514명이에요.\n```json\n{\"그래프\": null}\n```"
+    flagged = run_analyst_turn([], "몇 명?", tables)
+    assert flagged['text'].startswith("대전은 1,514명이에요.") and "확인되지 않았어요" in flagged['text']
+    # 그래프에서 합계 행은 뺀다
+    with_total = pd.DataFrame({'SO권역': ['대전', '대구', '합계'], 'MAU': [2, 2, 4]})
+    assert [r['SO권역'] for r in table_to_pivot_result(with_total, {'x': ['SO권역'], '값': ['MAU']})['결과']] == ['대전', '대구']
     assert run_code("x = 1", tables, {})['error'].startswith("`결과`"), "결과를 안 담으면 오류로 알려준다"
     assert run_code("result = 1", tables, {})['value'] == 1, "영어 이름 result도 결과로 받는다"
     assert run_code("import pandas as pd\n결과 = pd.Series([1]).sum()", tables, {})['value'] == 1

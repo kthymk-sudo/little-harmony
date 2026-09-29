@@ -14,13 +14,14 @@ from utils.emm_export import build_emm_bytes, parse_report_tree
 
 def _autosave():
     first_user_text = next((m['text'] for m in st.session_state.report_messages if m['role'] == 'user'), "")
-    save_conversation(
+    if not save_conversation(
         conv_id=st.session_state.report_current_conversation_id,
         title=make_conversation_title(first_user_text, feature='report'),
         phase='', messages=st.session_state.report_messages,
         conditions={}, stats={}, member_ids=[], reasoning="", push_copy="",
         feature='report',
-    )
+    ):
+        st.session_state.save_failed = True  # main.py가 다음 화면에서 경고를 띄운다
 
 
 def render_report_chat(profile_df, db_audience=None, db_content=None):
