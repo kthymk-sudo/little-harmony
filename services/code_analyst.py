@@ -235,15 +235,22 @@ def table_to_pivot_result(value, graph):
 
     change = None
     ch = graph.get('증감') or {}
-    if chart_type == '증감' and ch.get('기준값') in df.columns and ch.get('비교값') in df.columns:
+    base, comp = ch.get('기준값'), ch.get('비교값')
+    if chart_type == '증감' and base in df.columns and comp in df.columns and base != comp:
         m = values[0]
-        rate = ch.get('증감률') if ch.get('증감률') in df.columns else None
-        flat = df[x + [ch['기준값'], ch['비교값'], m] + ([rate] if rate else [])]
-        series = {m: [ch['기준값'], ch['비교값']]}
-        labels = {ch['기준값']: ch['기준값'], ch['비교값']: ch['비교값']}
-        change = {'기준': ch['기준값'], '비교': ch['비교값'],
-                  '측정값': {m: {'기준': ch['기준값'], '비교': ch['비교값'], '증감': m, '증감률': rate}}}
-        units = {m: units.get(m, '')}
+        rate = ch.get('증감률') if ch.get('증감률') in df.columns and ch.get('증감률') not in (base, comp) else None
+        # AI가 값 컬럼으로 기준/비교/증감률 컬럼을 그대로 가리키면(같은 컬럼이 두 번 쓰여 그래프가 깨짐)
+        # 증감을 직접 계산한 별도 컬럼으로 쓴다
+        diff = m
+        if m in (base, comp, rate):
+            diff = '증감' if '증감' not in (base, comp, rate) else '증감(계산)'
+            df[diff] = pd.to_numeric(df[comp], errors='coerce') - pd.to_numeric(df[base], errors='coerce')
+        flat = df[list(dict.fromkeys(x + [base, comp, diff] + ([rate] if rate else [])))]
+        series = {diff: [base, comp]}
+        labels = {base: base, comp: comp}
+        change = {'기준': base, '비교': comp,
+                  '측정값': {diff: {'기준': base, '비교': comp, '증감': diff, '증감률': rate}}}
+        units = {diff: units.get(m, '')}
     else:
         if chart_type == '증감':
             chart_type = '막대'
@@ -456,6 +463,20 @@ jul, aug = m['2026-07'], m['2026-08']
     change = table_to_pivot_result(wide, {'x': ['SO권역'], '값': ['증감'], '차트유형': '증감', '증감': {'기준값': '7월', '비교값': '8월'}})
     assert change['증감']['측정값']['증감']['증감'] == '증감' and change['차트유형'] == '증감'
     json.dumps([data, change], ensure_ascii=False)
+    # 에러 재현: 값 컬럼을 증감률 컬럼과 같게 지정 → 증감은 따로 계산하고, 그래프까지 그려져야 한다
+    rate_df = wide.assign(증감률=[-50.0, None])
+    same = table_to_pivot_result(rate_df, {'x': ['SO권역'], '값': ['증감률'], '차트유형': '증감',
+                                           '증감': {'기준값': '7월', '비교값': '8월', '증감률': '증감률'}})
+    info = same['증감']['측정값']['증감']
+    assert info['증감률'] == '증감률' and [r['증감'] for r in same['결과']] == [-1, 2]
+    from ui.chart_render import build_pivot_chart_figure
+    assert build_pivot_chart_figure({'type': 'pivot', 'data': same}) is not None
+    # 이미 저장된 깨진 형식(같은 컬럼이 증감·증감률에 둘 다)도 그려진다
+    broken = {**change, '증감': {'기준': '7월', '비교': '8월', '측정값': {'증감': {'기준': '7월', '비교': '8월', '증감': '증감', '증감률': '증감'}}}}
+    assert build_pivot_chart_figure({'type': 'pivot', 'data': broken}) is not None
+    # 기준과 비교가 같은 컬럼이면 증감 대신 막대
+    assert table_to_pivot_result(wide, {'x': ['SO권역'], '값': ['8월'], '차트유형': '증감',
+                                        '증감': {'기준값': '8월', '비교값': '8월'}})['차트유형'] == '막대'
 
     # 한 턴 흐름(AI는 가짜): 코드 1번 실행 → 최종 답변 + 그래프 지정
     replies = iter([

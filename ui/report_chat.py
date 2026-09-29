@@ -44,7 +44,11 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
         if should_animate:
             st.session_state.report_stream_next = False
         chart_spec = turn.get("chart")
-        fig = build_pivot_chart_figure(chart_spec)
+        try:
+            fig = build_pivot_chart_figure(chart_spec)
+        except Exception:  # 그래프 하나가 깨져도 대화 화면 전체가 멈추지 않게
+            fig = None
+            st.caption("⚠️ 이 그래프는 그리지 못했어요.")
         if fig is not None:
             st.plotly_chart(fig, width='stretch', key=f"report_chart_{i}")
             table_df = pivot_table_df(chart_spec.get("data") or {})

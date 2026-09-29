@@ -38,7 +38,8 @@ def pivot_table_df(pivot_result):
     series_cols = [c for cols in (data.get("계열") or {}).values() for c in cols]
     change_cols = [c for info in ((data.get("증감") or {}).get("측정값") or {}).values()
                    for c in (info.get("증감"), info.get("증감률")) if c]
-    ordered_cols = [c for c in (data.get("행컬럼") or []) + series_cols + change_cols if c in df.columns]
+    # 같은 컬럼이 두 번 들어가면 df[컬럼]이 표로 꺼내져 그래프가 깨진다 - 한 번씩만
+    ordered_cols = [c for c in dict.fromkeys((data.get("행컬럼") or []) + series_cols + change_cols) if c in df.columns]
     return df[ordered_cols] if ordered_cols else df
 
 
