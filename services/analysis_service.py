@@ -1,12 +1,10 @@
 # services/analysis_service.py
 # ============================================================
-# 📊 분석 탭 대화 한 턴 처리 (Streamlit 비의존 - 단위 테스트 가능).
-# 고정된 질문 유형(그룹현황/순위) 대신, AI가 번역한 피벗 스펙(행/열/측정값/
-# 집계방식/차트유형)을 받아 시청이력 원본(db_audience, 리스트 컬럼이 없는
-# 평평한 이벤트 단위 데이터)을 직접 피벗 집계한다 - 구 시스템
-# visualization/chart_generator.py의 피벗 로직을 Streamlit 의존 없이 이식.
-# AI는 숫자를 전혀 만들지 않는다: 행/열/측정값을 해석만 하고, 실제 집계는
-# 전부 이 파일의 결정론적 pandas 연산이 담당한다.
+# 피벗 스펙 엔진 + 공용 데이터 가공 (Streamlit 비의존 - 단위 테스트 가능).
+# AI가 정한 피벗 스펙(행/열/측정값/집계방식/차트유형)을 받아 시청이력 원본(db_audience)을
+# 직접 피벗 집계한다 - 📝 보고서 탭의 "데이터요청"이 이걸 쓴다.
+# 📊 분석 탭은 AI 코드 실행형(services/code_analyst.py)으로 바뀌었고, 여기의 파생 컬럼
+# (나이대/월/SO권역/등록월 등)과 콘텐츠 정보 붙이기, 결과 형식(pivot_result)을 같이 쓴다.
 #
 # 🌟 [콘텐츠 분석] "분석대상"으로 데이터 기준을 나눈다(기준이 다른 숫자를 한 표에
 # 섞지 않기 위함 - 구 시스템은 누적 통계와 기간 시청이력 집계를 한 표에 나란히 뒀다).
@@ -18,20 +16,37 @@
 import re
 import numpy as np
 import pandas as pd
-from ai_engine.gemini_api import (
-    generate_analysis_chat_reply, generate_pivot_insight_reply, generate_comparison_feedback_reply, is_api_error,
-)
-from database.db_manager import summarize_profile_context, _filter_by_conditions
-from utils.response_parser import parse_target_conditions
+from config import SO_REGIONS
+from database.db_manager import _filter_by_conditions
 
 # 행/열로 쓸 수 있는 필드 -> 실제 컬럼명 (다르면 매핑, 같으면 자기 자신).
 # 분석대상별 데이터에 실제로 있는 컬럼만 쓰이므로(예: 콘텐츠 기준엔 성별 없음) 목록은 하나로 둔다.
-_FIELD_COLUMN_MAP = {'SO': '시청자SO'}
+# 🌟 [SO 권역] "SO"는 기본적으로 8개 권역(config.SO_REGIONS)으로 묶고, 세부 SO는 "SO세부"로 본다.
+_FIELD_COLUMN_MAP = {'SO': 'SO권역', 'SO세부': '시청자SO', '업로더SO': '업로더권역', '업로더SO세부': '업로더SO'}
 _ALLOWED_ROW_COL_FIELDS = {
-    '성별', '나이대', 'SO', '채널명', '메뉴명', '장르', '시리즈명', '영상명', '시청시작시', '월', '시청일',
-    '업로더 구분', '업로더SO', '제작자', '가격유형', '등록월',
+    '성별', '나이대', 'SO', 'SO세부', '채널명', '메뉴명', '장르', '시리즈명', '영상명', '시청시작시', '월', '시청일',
+    '업로더 구분', '업로더SO', '업로더SO세부', '제작자', '가격유형', '등록월',
     '__전체',  # 내부용: 전체를 한 묶음으로 집계(비교 피드백의 전체값) - AI에게는 노출하지 않음
 }
+_SO_TO_REGION = {so: region for region, sos in SO_REGIONS.items() for so in sos}
+_REGION_ORDER = list(SO_REGIONS)
+_REGION_COLUMNS = {'SO권역', '업로더권역'}
+
+
+def _region_sort_key(series):
+    """권역은 가나다순이 아니라 정해둔 순서(대전→충청→…→대구)로, 목록에 없는 값은 그 뒤에."""
+    if series.name not in _REGION_COLUMNS:
+        return series
+    return series.map(lambda v: (_REGION_ORDER.index(v), '') if v in _REGION_ORDER else (len(_REGION_ORDER), str(v)))
+
+
+def _expand_so_regions(conditions):
+    """필터조건의 SO에 권역 이름("대전")이 오면 그 권역의 실제 SO 이름들로 펼친다."""
+    if not conditions or not conditions.get('SO'):
+        return conditions
+    values = conditions['SO'] if isinstance(conditions['SO'], list) else [conditions['SO']]
+    expanded = [so for v in values for so in SO_REGIONS.get(str(v).strip(), [v])]
+    return {**conditions, 'SO': expanded}
 # 🌟 [다중 행/열/값] 표와 그래프가 읽을 수 없을 만큼 커지지 않도록 개수 상한을 둔다
 _MAX_ROWS, _MAX_COLS, _MAX_VALUES = 2, 2, 3
 _CONTENT_ATTR_COLS = ['업로더 구분', '업로더SO', '제작자', '가격유형', '등록일', '삭제 여부']
@@ -147,6 +162,9 @@ def _add_derived_columns(df):
         # 유지율을 모르는 시청(러닝타임 0)은 "끝까지 안 봄"이 아니라 계산에서 빠져야 하므로 NaN 유지
         retention = pd.to_numeric(df['시청 유지율'], errors='coerce')
         df['__완료'] = ((retention >= _COMPLETION_THRESHOLD) * 100.0).where(retention.notna())
+    for raw, region in (('시청자SO', 'SO권역'), ('업로더SO', '업로더권역')):
+        if raw in df.columns:
+            df[region] = df[raw].map(lambda v: _SO_TO_REGION.get(v, v))
     return df
 
 
@@ -168,7 +186,7 @@ def _with_content_attrs(df, db_content):
 def _filtered_audience(db_audience, profile_df, conditions):
     if not conditions or profile_df is None or profile_df.empty:
         return db_audience
-    matched = _filter_by_conditions(profile_df.copy(), conditions, db_audience)
+    matched = _filter_by_conditions(profile_df.copy(), _expand_so_regions(conditions), db_audience)
     matched_ids = set(matched['R고객번호'].astype(str).unique().tolist())
     return db_audience[db_audience['R고객번호'].astype(str).isin(matched_ids)]
 
@@ -229,6 +247,9 @@ def _measure_frame(safe_df, row_cols, col_cols, key, value_spec, agg_label):
         frame = _pivot(value_spec['col'], agg)
         divide = value_spec['divide']
 
+    if len(col_cols) == 1 and col_cols[0] in _REGION_COLUMNS:  # 열이 SO여도 정해둔 권역 순서로
+        order = _region_sort_key(pd.Series(list(frame.columns), name=col_cols[0]))
+        frame = frame[[c for _, c in sorted(zip(order, frame.columns))]]
     if col_cols:
         frame.columns = [' · '.join(str(v) for v in (c if isinstance(c, tuple) else (c,))) for c in frame.columns]
     else:
@@ -319,7 +340,7 @@ def run_pivot_analysis(db_audience, profile_df, spec, db_content=None):
     flat.columns = [str(c) for c in flat.columns]
     row_col_names = [str(c) for c in row_cols]
     # 시청일(YYYY-MM-DD)/월·등록월(YYYY-MM)/시청시작시(00시~23시)는 문자열 정렬이 곧 시간순이다.
-    flat = flat.sort_values(row_col_names, kind='mergesort').reset_index(drop=True)
+    flat = flat.sort_values(row_col_names, kind='mergesort', key=_region_sort_key).reset_index(drop=True)
 
     chart_type = spec.get('차트유형') if spec.get('차트유형') in CHART_TYPES else '막대'
     if chart_type == '증감' and not change:
@@ -355,16 +376,6 @@ def describe_pivot(data):
     return text + (f" ({'·'.join(data['열'])} 비교)" if data.get('열') else "")
 
 
-def _format_pivot_fallback_reply(pivot_result):
-    if pivot_result is None:
-        return "죄송해요, 그 요청은 정확히 어떤 기준으로 나눠서 뭘 보여드려야 할지 판단하기 어려웠어요. 예를 들어 '채널별 누적 시청시간 보여줘'처럼 다시 말씀해주시겠어요?"
-    rows = pivot_result.get('결과') or []
-    if not rows:
-        return "말씀하신 조건에 맞는 시청 데이터를 찾지 못했어요. 조건을 조금 다르게 말씀해주시겠어요?"
-    return (f"{describe_pivot(pivot_result)} 기준으로 총 {pivot_result['전체행수']}개 "
-            f"항목이 나왔어요({pivot_result['데이터기준']}). 그래프가 필요하면 답변 아래 버튼을 눌러주세요.")
-
-
 def insight_rows_str(pivot_result, limit=30):
     """인사이트 문장 생성용 결과 행. 기준값 순서로 앞 10행만 넘기면 AI가 그 안에서만 최댓값을
     찾아 틀린 말을 한다(예: 00~09시만 보고 "09시가 최고"). 행이 많으면 첫 계열 값 기준 상위만 넘긴다."""
@@ -376,92 +387,9 @@ def insight_rows_str(pivot_result, limit=30):
     return str(rows)
 
 
-_COMPARISON_TOP_N = 10
-
-
-def build_comparison(db_audience, profile_df, spec, db_content=None):
-    """🌟 [전체 비교 피드백] 대화로 도출한 결과를 같은 기준의 전체와 비교한 수치를 계산한다.
-    AI는 이 수치만 보고 미시/거시 피드백을 쓴다(숫자를 만들지 않음). 비교는 행 기준으로만 한다
-    (열까지 교차하면 비교 항목이 폭발적으로 늘어 해석이 흐려진다).
-      - 필터조건으로 좁힌 경우: 세그먼트 vs 같은 행 기준의 전체
-          합계/건수류는 구성비(%)와 지수(세그먼트 구성비 ÷ 전체 구성비), 평균/비율류는 값 차이
-      - 조건 없이 본 경우: 항목별 구성비, 평균/비율류는 전체 평균 대비 차이"""
-    target = _target_of(spec)
-    value_specs = _CONTENT_VALUE_SPECS if target == '콘텐츠' else _VIEW_VALUE_SPECS
-    agg_label = (spec.get('집계방식') or '').strip()
-    base = {**spec, '열': [], '증감': None}  # 기간은 그대로 둬서 전체도 같은 기간으로 비교한다
-    seg = run_pivot_analysis(db_audience, profile_df, base, db_content)
-    if not seg or not seg.get('결과'):
-        return None
-    has_filter = target == '시청' and bool(spec.get('필터조건'))
-    whole_spec = {**base, '필터조건': {}}
-
-    def _overall(s, measures):
-        r = run_pivot_analysis(db_audience, profile_df, {**s, '행': ['__전체'], '측정값': measures}, db_content)
-        return r['결과'][0] if r and r.get('결과') else {}
-
-    total = run_pivot_analysis(db_audience, profile_df, whole_spec, db_content) if has_filter else None
-    seg_all = _overall(base, seg['측정값'])
-    tot_all = _overall(whole_spec, seg['측정값']) if has_filter else {}
-
-    def _label(r):
-        return ' · '.join(str(r[c]) for c in seg['행컬럼'])
-
-    total_rows = {_label(r): r for r in total['결과']} if total else {}
-    items = []
-    for m in seg['측정값']:
-        is_share = _measure_is_share(value_specs[m], agg_label)
-        seg_sum = sum(r[m] for r in seg['결과'])
-        tot_sum = sum(r[m] for r in total['결과']) if total else 0
-        measure_items = []
-        for r in seg['결과']:
-            item = {'항목': _label(r), '측정값': m, '값': r[m]}
-            if is_share:
-                item['이 결과 내 구성비(%)'] = round(r[m] / seg_sum * 100, 1) if seg_sum else 0
-                if total:
-                    t_share = round(total_rows.get(item['항목'], {}).get(m, 0) / tot_sum * 100, 1) if tot_sum else 0
-                    item['전체 구성비(%)'] = t_share
-                    item['지수(전체=1.0)'] = round(item['이 결과 내 구성비(%)'] / t_share, 2) if t_share else None
-                gap = abs((item.get('지수(전체=1.0)') or 1) - 1) if total else item['이 결과 내 구성비(%)']
-            else:
-                ref = total_rows.get(item['항목'], {}).get(m) if total else seg_all.get(m)
-                item['비교값(' + ('전체 같은 항목' if total else '전체 평균') + ')'] = ref
-                item['차이'] = round(r[m] - ref, 1) if ref is not None and r[m] is not None else None
-                gap = abs(item['차이'] or 0)
-            measure_items.append((gap, item))
-        if len(measure_items) > _COMPARISON_TOP_N:
-            # 항목이 많으면 규모가 큰 항목과 전체와 차이가 큰 항목만 남긴다
-            by_size = sorted(measure_items, key=lambda x: x[1]['값'] or 0, reverse=True)[:_COMPARISON_TOP_N]
-            by_gap = sorted(measure_items, key=lambda x: x[0], reverse=True)[:_COMPARISON_TOP_N]
-            keep = {id(i) for _, i in by_size + by_gap}
-            measure_items = [x for x in measure_items if id(x[1]) in keep]
-        items.extend(i for _, i in measure_items)
-
-    scale = {}
-    if has_filter:
-        seg_scale = _overall(base, ['시청자수', '시청건수'])
-        tot_scale = _overall(whole_spec, ['시청자수', '시청건수'])
-        for k in ('시청자수', '시청건수'):
-            if tot_scale.get(k):
-                scale[k] = {'세그먼트': seg_scale.get(k), '전체': tot_scale[k],
-                            '비중(%)': round(seg_scale.get(k, 0) / tot_scale[k] * 100, 1)}
-    return {
-        '분석': describe_pivot(seg), '데이터기준': seg['데이터기준'], '단위': seg['단위'],
-        '비교방식': ('조건으로 좁힌 세그먼트 vs 같은 기준의 전체' if has_filter
-                  else '조건 없이 전체를 본 결과라 항목별 구성비와 전체 평균 대비 차이로 비교'),
-        '세그먼트조건': spec.get('필터조건') or '없음',
-        '측정값별 전체값': {m: {'세그먼트': seg_all.get(m), **({'전체': tot_all.get(m)} if has_filter else {})}
-                        for m in seg['측정값']},
-        '세그먼트 규모': scale, '항목 수': len(seg['결과']), '항목비교': items,
-    }
-
-
 def insight_spec_str(spec, pivot_result):
     """인사이트 문장 생성용 AI 입력 - 데이터 기준과 단위도 함께 넘겨 누적/직원 포함 여부와 단위를 설명하게 한다."""
     return str({**spec, '데이터기준': pivot_result['데이터기준'], '단위': pivot_result['단위']})
-
-
-_RECENT_TURNS_FOR_INSIGHT = 6
 
 
 def chart_spec_from(data, chart_type=None):
@@ -469,110 +397,6 @@ def chart_spec_from(data, chart_type=None):
     if chart_type in CHART_TYPES and not (chart_type == '증감' and not data.get('증감')):
         data = {**data, '차트유형': chart_type}
     return {"type": "pivot", "data": data}
-
-
-def _spec_core(spec):
-    """같은 집계인지 비교용 - 차트 종류/그래프 요청 여부는 집계 결과에 영향이 없으므로 뺀다."""
-    return (
-        _target_of(spec), tuple(_as_fields(spec.get('행'), _MAX_ROWS)), tuple(_as_fields(spec.get('열'), _MAX_COLS)),
-        tuple(_as_fields(spec.get('측정값'), _MAX_VALUES)), (spec.get('집계방식') or '').strip(),
-        str(spec.get('필터조건') or {}), _period_bounds(spec.get('기간')),
-        str({k: v for k, v in (spec.get('증감') or {}).items() if v}),
-    )
-
-
-def _history_for_ai(messages):
-    """AI가 "그럼 여성만"/"그래프로 만들어줘" 같은 후속 요청을 이어갈 수 있도록, 데이터를 집계한
-    답변 뒤에 실제로 쓴 스펙을 붙여서 넘긴다(화면에 보이는 텍스트만으로는 기준을 알 수 없음)."""
-    return [
-        {**m, 'text': f"{m['text']}\n[이 답변에서 집계한 스펙: {m['spec']}]"} if m.get('spec') else m
-        for m in messages
-    ]
-
-
-def _last_data_message(messages):
-    return next((m for m in reversed(messages) if m.get('role') == 'assistant' and m.get('data')), None)
-
-
-_FEEDBACK_REQUEST_TEXT = "🔍 이 결과를 전체와 비교해서 피드백해줘"
-
-
-def _feedback_message(spec, question, context_messages, profile_df, db_audience, db_content):
-    """🌟 [전체 비교 피드백] 비교 수치를 계산하고 AI가 미시/거시 관점 피드백을 쓴다."""
-    comparison = build_comparison(db_audience, profile_df, spec, db_content)
-    if comparison is None:
-        return {"role": "assistant", "text": "비교할 분석 결과를 찾지 못했어요. 먼저 궁금한 걸 물어봐주시면 데이터로 확인해드릴게요."}
-    reply = generate_comparison_feedback_reply(
-        question, str(comparison), conversation=_history_for_ai(context_messages[-_RECENT_TURNS_FOR_INSIGHT:]),
-    )
-    if is_api_error(reply):
-        reply = "전체와 비교한 수치는 계산했지만 피드백 문장을 만들지 못했어요. 잠시 후 다시 요청해주세요."
-    # 이 메시지에는 data를 두지 않는다 - "그래프로 보여줘"는 직전 분석 결과를 그대로 쓰게 하기 위함
-    return {"role": "assistant", "text": reply, "spec": spec, "feedback": True}
-
-
-def process_feedback_request(messages, index, profile_df, db_audience=None, db_content=None):
-    """답변 아래 '🔍 전체와 비교 피드백' 버튼용. 반환: new_messages"""
-    spec = messages[index].get('spec')
-    history = messages + [{"role": "user", "text": _FEEDBACK_REQUEST_TEXT}]
-    if not spec:
-        return history + [{"role": "assistant", "text": "이 답변에는 비교할 집계 결과가 없어요."}]
-    return history + [_feedback_message(spec, _FEEDBACK_REQUEST_TEXT, messages, profile_df, db_audience, db_content)]
-
-
-def process_analysis_turn(messages, user_text, profile_df, db_audience=None, db_content=None):
-    """🌟 [대화형 분석] 한 턴 처리. 반환: (new_messages, chart_spec 또는 None)
-    - 데이터가 필요한 질문: 실제로 집계하고, 그 숫자로 대화형 답변을 만든다. 결과는 답변 메시지의
-      "data"(+ 쓴 스펙 "spec")에 담고, 그래프는 실무자가 원할 때만 "chart"로 붙인다.
-    - 되묻기/상의: AI 답변만 남긴다.
-    - "그래프로 만들어줘": 직전과 같은 집계면 다시 계산하지 않고 직전 결과로 그래프를 붙인다.
-    - "전체랑 비교해서 피드백해줘": 직전(또는 새로 지정한) 집계를 전체와 비교한 미시/거시 피드백."""
-    history_with_user = messages + [{"role": "user", "text": user_text}]
-    profile_context_str = f"{summarize_profile_context(profile_df)}\n{data_period_str(db_audience)}"
-
-    ai_raw = generate_analysis_chat_reply(_history_for_ai(history_with_user), profile_context_str)
-    reply_text, spec = parse_target_conditions(ai_raw)
-    spec = spec or {}
-    wants_chart = spec.pop('그래프요청', False) is True
-    wants_feedback = spec.pop('피드백요청', False) is True
-    has_spec = bool(_as_fields(spec.get('행'), _MAX_ROWS) and _as_fields(spec.get('측정값'), _MAX_VALUES))
-    last = _last_data_message(messages)
-    new_message = {"role": "assistant", "text": reply_text}
-
-    if wants_feedback:
-        target_spec = spec if has_spec else (last.get('spec') if last else None)
-        if target_spec:
-            new_message = _feedback_message(target_spec, user_text, messages, profile_df, db_audience, db_content)
-        else:
-            new_message['text'] = "아직 비교할 분석 결과가 없어요. 먼저 궁금한 걸 물어봐주시면 데이터로 확인해드릴게요."
-    elif wants_chart and last and (not has_spec or _spec_core(spec) == _spec_core(last.get('spec') or {})):
-        new_message.update(
-            text=f"방금 본 결과({describe_pivot(last['data'])})를 그래프로 만들었어요.",
-            data=last['data'], spec=last.get('spec'),
-            chart=chart_spec_from(last['data'], spec.get('차트유형')),
-        )
-    elif has_spec:
-        pivot_result = run_pivot_analysis(db_audience, profile_df, spec, db_content)
-        if pivot_result and pivot_result.get('결과'):
-            ai_reply = generate_pivot_insight_reply(
-                user_text, insight_spec_str(spec, pivot_result), insight_rows_str(pivot_result),
-                conversation=_history_for_ai(messages[-_RECENT_TURNS_FOR_INSIGHT:]), follow_up=True,
-            )
-            new_message.update(
-                text=_format_pivot_fallback_reply(pivot_result) if is_api_error(ai_reply) else ai_reply,
-                data=pivot_result, spec=spec,
-            )
-            if wants_chart:
-                new_message['chart'] = chart_spec_from(pivot_result)
-        else:
-            # AI가 스펙은 정했지만 결과가 비었거나 필드가 무효한 경우
-            new_message['text'] = _format_pivot_fallback_reply(pivot_result)
-    elif wants_chart:
-        new_message['text'] = "아직 그래프로 만들 분석 결과가 없어요. 먼저 궁금한 걸 물어봐주시면 데이터로 확인해드릴게요."
-
-    if not new_message['text']:
-        new_message['text'] = "어떤 걸 살펴볼까요? 궁금한 점을 편하게 말씀해주세요."
-    return history_with_user + [new_message], new_message.get('chart')
 
 
 if __name__ == "__main__":
@@ -622,6 +446,15 @@ if __name__ == "__main__":
     old = {'행': '채널명', '열': '', '측정값': '시청건수', '단위': '건', '행컬럼': '채널명', '계열컬럼': ['시청건수']}
     assert normalize_pivot_result(old)['계열'] == {'시청건수': ['시청건수']}, "예전 형식 대화도 읽힌다"
 
+    # SO 권역: 기본 8개 권역으로 묶이고(대전=씨엠비+동대전) 정해둔 순서로, 세부는 SO세부 + 권역 필터로
+    so = pd.DataFrame({'R고객번호': ['1', '2', '3', '4'], '콘텐츠ID': ['a'] * 4, '시청일': ['2026-08-01'] * 4,
+                       '시청자SO': ['㈜씨엠비수성방송', '㈜씨엠비', '㈜씨엠비동대전방송', '㈜씨엠비대구방송']})
+    so_profile = so[['R고객번호', '시청자SO']].copy()
+    regions = run_pivot_analysis(so, so_profile, {'행': 'SO', '측정값': '시청자수'}, None)
+    assert [(r['SO권역'], r['시청자수']) for r in regions['결과']] == [('대전', 2), ('대구', 2)]
+    detail = run_pivot_analysis(so, so_profile, {'행': 'SO세부', '측정값': '시청자수', '필터조건': {'SO': ['대전']}}, None)
+    assert [r['시청자SO'] for r in detail['결과']] == ['㈜씨엠비', '㈜씨엠비동대전방송']
+
     # 기간 + 증감: SO별 7월 대비 8월 시청자수(MAU)
     mau = pd.DataFrame({
         'R고객번호': ['1', '2', '3', '1', '4', '5', '6'], '콘텐츠ID': ['a'] * 7, '시청자SO': ['P', 'P', 'Q', 'P', 'P', 'Q', 'R'],
@@ -630,52 +463,13 @@ if __name__ == "__main__":
     ch = run_pivot_analysis(mau, None, {
         '행': 'SO', '열': '월', '측정값': ['시청자수', '시청유지율'], '기간': {'시작': '2026-07', '종료': '2026-08'},
         '증감': {'기준': '7월', '비교': '2026-08'}, '차트유형': '증감'}, None)
-    by_so = {r['시청자SO']: r for r in ch['결과']}
+    by_so = {r['SO권역']: r for r in ch['결과']}  # 권역 목록에 없는 SO(P/Q/R)는 이름 그대로
     assert ch['기간'] == ['2026-07-01', '2026-08-31'] and '2026-07-01 ~ 2026-08-31' in ch['데이터기준']
     assert by_so['P']['증감 (시청자수)'] == 1 and by_so['P']['증감률% (시청자수)'] == 100.0, "P: 7월 1명(2번) → 8월 2명(1,4번)"
     assert by_so['Q']['증감 (시청자수)'] == 0 and 'R' not in by_so, "6/30·9/1 기록은 기간 밖"
     assert ch['증감']['측정값']['시청유지율']['증감률'] is None, "비율류는 증감률 없이 %p 차이만"
-    assert ch['차트유형'] == '증감' and _spec_core({'기간': {'시작': '2026-07'}}) != _spec_core({})
+    assert ch['차트유형'] == '증감'
     no_change = run_pivot_analysis(mau, None, {'행': 'SO', '측정값': '시청자수', '차트유형': '증감'}, None)
     assert no_change['차트유형'] == '막대' and no_change['증감'] is None, "증감 불가면 막대로"
 
-    # 전체 비교: 여성(1,3번 고객) vs 전체
-    cmp_ = build_comparison(views, profile, {'행': '채널명', '측정값': ['시청건수', '시청유지율'], '필터조건': {'성별': '여자'}}, content)
-    by = {(i['항목'], i['측정값']): i for i in cmp_['항목비교']}
-    assert by[('X', '시청건수')]['이 결과 내 구성비(%)'] == 66.7 and by[('X', '시청건수')]['전체 구성비(%)'] == 80.0
-    assert by[('Y', '시청건수')]['지수(전체=1.0)'] > 1 > by[('X', '시청건수')]['지수(전체=1.0)']
-    assert by[('X', '시청유지율')]['차이'] == -8.3 and by[('Y', '시청유지율')]['차이'] == 0
-    assert cmp_['세그먼트 규모']['시청자수'] == {'세그먼트': 2, '전체': 4, '비중(%)': 50.0}
-    no_filter = build_comparison(views, profile, {'행': '채널명', '측정값': '시청유지율'}, content)
-    assert no_filter['항목비교'][0]['비교값(전체 평균)'] == 65.0 and not no_filter['세그먼트 규모']
-
-    # 대화형 턴: AI 호출은 가짜로 바꿔서 흐름만 검사한다
-    import json
-    ai_calls = []
-
-    def fake_turn(spec, text="확인해볼게요"):
-        globals()['generate_analysis_chat_reply'] = lambda *a: f"{text}\n```json\n{json.dumps(spec, ensure_ascii=False)}\n```"
-        globals()['generate_pivot_insight_reply'] = lambda *a, **k: ai_calls.append(k) or "A가 가장 많아요. 채널별로도 볼까요?"
-        globals()['summarize_profile_context'] = lambda *a: ""
-        globals()['generate_comparison_feedback_reply'] = lambda *a, **k: "🔬 미시적 관점 ... 🌐 거시적 관점 ..."
-
-    msgs = []
-    fake_turn({'행': '영상명', '측정값': '시청건수', '그래프요청': False})
-    msgs, chart = process_analysis_turn(msgs, "영상별로 얼마나 봤어?", None, views, content)
-    assert chart is None and msgs[-1]['data']['결과'] and 'chart' not in msgs[-1], "숫자로만 답하고 그래프는 안 만든다"
-    assert ai_calls[-1]['follow_up'] is True
-    n_calls = len(ai_calls)
-    fake_turn({'행': '영상명', '측정값': '시청건수', '차트유형': '선', '그래프요청': True})
-    msgs, chart = process_analysis_turn(msgs, "그래프로 보여줘", None, views, content)
-    assert chart and chart['data']['차트유형'] == '선' and len(ai_calls) == n_calls, "같은 집계면 재계산/재설명 없이 그래프만"
-    fake_turn({'행': '', '측정값': '', '그래프요청': False}, text="시청자수 기준으로 볼까요, 누적 조회수 기준으로 볼까요?")
-    msgs, chart = process_analysis_turn(msgs, "인기 콘텐츠 알려줘", None, views, content)
-    assert chart is None and 'data' not in msgs[-1] and msgs[-1]['text'].startswith("시청자수 기준")
-    assert "[이 답변에서 집계한 스펙" in _history_for_ai(msgs)[1]['text']
-    # 피드백: 말로 요청하면 직전 집계 스펙으로, 버튼이면 그 답변의 스펙으로 비교한다
-    fake_turn({'행': [], '측정값': [], '피드백요청': True})
-    msgs, _ = process_analysis_turn(msgs, "전체랑 비교해서 피드백 줘", profile, views, content)
-    assert msgs[-1].get('feedback') and msgs[-1]['spec']['행'] == '영상명' and 'data' not in msgs[-1]
-    msgs = process_feedback_request(msgs, 1, profile, views, content)
-    assert msgs[-2]['text'] == _FEEDBACK_REQUEST_TEXT and msgs[-1].get('feedback')
     print("analysis_service self-check OK")

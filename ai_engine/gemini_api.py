@@ -5,7 +5,7 @@ import streamlit as st
 from config import GEMINI_API_KEY
 from prompts.target_chat_prompt import get_target_chat_prompt, get_target_reasoning_prompt, get_segment_insight_prompt
 from prompts.push_prompt import get_push_prompt, get_sms_prompt
-from prompts.analysis_chat_prompt import get_analysis_chat_prompt, get_pivot_insight_prompt, get_comparison_feedback_prompt
+from prompts.analysis_chat_prompt import get_pivot_insight_prompt
 from prompts.report_prompt import get_report_prompt
 
 _http_session = requests.Session()
@@ -230,20 +230,13 @@ def generate_segment_insight_reply(question_str, conditions_str, insight_stats_s
     prompt = get_segment_insight_prompt(question_str, conditions_str, insight_stats_str)
     return _call_gemini_api(prompt, temperature=0.4)
 
-def generate_pivot_insight_reply(question_str, spec_str, result_str, conversation=None, follow_up=False):
-    conversation_str = _format_chat_history(conversation) if conversation else ""
-    prompt = get_pivot_insight_prompt(question_str, spec_str, result_str, conversation_str, follow_up)
+def generate_pivot_insight_reply(question_str, spec_str, result_str):
+    prompt = get_pivot_insight_prompt(question_str, spec_str, result_str)
     return _call_gemini_api(prompt, temperature=0.4)
 
-def generate_comparison_feedback_reply(question_str, comparison_str, conversation=None):
-    conversation_str = _format_chat_history(conversation) if conversation else ""
-    prompt = get_comparison_feedback_prompt(question_str, comparison_str, conversation_str)
-    return _call_gemini_api(prompt, temperature=0.4)
-
-def generate_analysis_chat_reply(chat_history, profile_context_str):
-    chat_history_str = _format_chat_history(chat_history)
-    prompt = get_analysis_chat_prompt(chat_history_str, profile_context_str)
-    return _call_gemini_api(prompt, temperature=0.3)
+def generate_code_analyst_step(prompt):
+    """📊 분석 탭 코드 실행형: 한 단계(코드 또는 최종 답변). 프롬프트는 services/code_analyst.py가 조립한다."""
+    return _call_gemini_api(prompt, temperature=0.2)
 
 def generate_report_reply(chat_history, profile_context_str):
     chat_history_str = _format_chat_history(chat_history)
