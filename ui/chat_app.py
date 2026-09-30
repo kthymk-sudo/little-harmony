@@ -17,7 +17,7 @@ from ui.chat_styles import inject_chat_css, render_message
 from ui.target_card import render_target_card, render_confirm_bar, autosave
 
 
-def render_chat_app(profile_df, db_audience=None):
+def render_chat_app(profile_df, db_audience=None, db_content=None):
     inject_chat_css()
 
     # 다른 대화로 방금 전환한 경우: 저장된 대상자 스냅샷을 현재 프로필에 다시 매칭
@@ -94,7 +94,7 @@ def render_chat_app(profile_df, db_audience=None):
             else:
                 new_messages, new_conditions = process_target_turn(
                     st.session_state.messages[:-1], st.session_state.target_conditions, pending, profile_df,
-                    db_audience,
+                    db_audience, db_content,
                 )
                 st.session_state.messages = new_messages
                 st.session_state.target_conditions = new_conditions

@@ -55,4 +55,4 @@ if st.session_state.active_feature == 'analysis':
 elif st.session_state.active_feature == 'report':
     render_report_chat(profile_df, db_audience, load_content())
 else:
-    render_chat_app(profile_df, db_audience)
+    render_chat_app(profile_df, db_audience, load_content())

@@ -12,11 +12,27 @@ from database.db_manager import (
     summarize_group_breakdown, format_group_breakdown_reply,
     _normalize_field_name, describe_term_matches, describe_period_warnings, data_period_line,
 )
+from services.code_analyst import build_tables, run_analyst_turn
 from utils.response_parser import parse_target_conditions
 from utils.naver_search import search_term_meaning
 
 
-def process_target_turn(messages, conditions, user_text, profile_df, db_audience=None):
+def _answer_with_analyst(question, conditions, profile_df, db_audience, db_content):
+    """🌟 [타겟팅 → 분석 연결] 정해진 질문 유형으로 답할 수 없는 데이터 질문은 분석 탭의 AI 코드 실행형 분석가가 실제 데이터를
+    계산해 답한다. 지금 잡고 있는 타겟 조건은 참고로만 알려주고, 실무자가 그 집단을 말했을 때만 좁혀 보게 한다."""
+    visible = {k: v for k, v in (conditions or {}).items() if not k.startswith('__')}
+    if visible:
+        question += f"\n(참고: 지금 대화 중인 타겟 조건은 {json.dumps(visible, ensure_ascii=False)}예요. 질문이 이 집단을 가리킬 때만 그 조건으로 좁혀 계산해.)"
+    try:
+        reply = run_analyst_turn([], question, build_tables(db_audience, db_content, profile_df))
+    except Exception:  # 분석이 실패해도 타겟팅 대화는 계속되게
+        return "분석 중 문제가 생겼어요. 데이터 분석 탭에서 같은 질문을 다시 해보시겠어요?"
+    if is_api_error(reply['text']):
+        return "분석 중 문제가 생겼어요. 잠시 뒤 다시 물어봐 주세요."
+    return f"{reply['text']}\n\n(분석 탭과 같은 방식으로 데이터를 직접 계산한 결과예요. 계산 과정과 그래프는 데이터 분석 탭에서 같은 질문을 하면 볼 수 있어요.)"
+
+
+def process_target_turn(messages, conditions, user_text, profile_df, db_audience=None, db_content=None):
     """타겟 설정 대화 한 턴 처리 (Streamlit 비의존 - 단위 테스트 가능)."""
     history_with_user = messages + [{"role": "user", "text": user_text}]
     profile_context_str = summarize_profile_context(profile_df) + "\n" + data_period_line(db_audience)
@@ -64,6 +80,8 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
     # 매 턴 새로 판단되는 1회성 값이므로 - 병합 루프 전에 따로 떼어낸다.
     content_ranking_question = parsed_conditions.pop('콘텐츠채널순위질문', None)
     group_breakdown_question = parsed_conditions.pop('그룹현황질문', None)
+    analysis_question = parsed_conditions.pop('분석질문', None)  # 위 유형으로 답할 수 없는 자유 분석 질문(1회성)
+    analysis_question = analysis_question.strip() if isinstance(analysis_question, str) else ""
 
     # 🌟 [조건 삭제 지원] "나이 조건 빼줘"처럼 실무자가 명확히 삭제를 요청하면, AI가
     # 해당 필드명을 이 리스트에 담아 내려준다. 아래 빈 값 스킵 병합 로직과는 별개로,
@@ -159,12 +177,16 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
         else:
             reply_text = fallback_reply
 
+    elif analysis_question:
+        reply_text = _answer_with_analyst(analysis_question, conditions, profile_df, db_audience, db_content)
+
     # 🌟 [키워드 매칭 안내] 이번 턴에 새로 나온 장르/채널/메뉴 조건이 실제 데이터의 어떤 값에 걸렸는지 알려준다
     # (질문 답변 턴이 아니라 조건을 정하는 턴에서만 - 조건이 그대로면 매번 반복하지 않는다)
     is_answer_turn = bool(
         (isinstance(question_conditions, dict) and question_conditions)
         or (isinstance(content_ranking_question, dict) and content_ranking_question.get('대상') and content_ranking_question.get('기준'))
         or (isinstance(group_breakdown_question, dict) and group_breakdown_question.get('기준필드'))
+        or analysis_question
     )  # (빈 틀만 채워 온 {"대상": "", ...}는 질문이 아니다)
     if not is_answer_turn:
         new_only = {k: v for k, v in merged_conditions.items() if (conditions or {}).get(k) != v}
@@ -175,3 +197,22 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
 
     new_messages = history_with_user + [{"role": "assistant", "text": reply_text}]
     return new_messages, merged_conditions
+
+
+if __name__ == "__main__":
+    # 정해진 질문 유형으로 답할 수 없는 데이터 질문은 분석가에게 넘겨 답하고, 타겟 조건은 그대로 두며, 분석이 실패해도 대화는 계속된다
+    tail = '\n```json\n{"분석질문": "6월 재방문율은?", "질문조건": {}}\n```'
+    globals()['generate_target_chat_reply'] = lambda *a, **k: "분석해볼게요." + tail
+    globals()['summarize_profile_context'] = lambda p: ""
+    globals()['build_tables'] = lambda *a: {}
+    asked = []
+    globals()['run_analyst_turn'] = lambda msgs, q, tables: asked.append(q) or {'role': 'assistant', 'text': '재방문율은 40%예요.'}
+    msgs, cond = process_target_turn([], {"성별": "여자"}, "6월 재방문율은?", None)
+    assert "재방문율은 40%" in msgs[-1]['text'] and cond == {"성별": "여자"} and "[참고]" not in msgs[-1]['text'], msgs[-1]
+    assert asked[0].startswith("6월 재방문율은?") and "성별" in asked[0]
+
+    def _boom(*a):
+        raise RuntimeError("x")
+    globals()['run_analyst_turn'] = _boom
+    assert "분석 중 문제" in process_target_turn([], {}, "x", None)[0][-1]['text']
+    print("target_service self-check OK")

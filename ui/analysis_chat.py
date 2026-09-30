@@ -9,16 +9,13 @@
 # 여러 단계로 파고드는 동안 진행 상황을 보여주고, 답변마다 "계산 과정 보기"로 실제 실행한
 # 코드와 중간 결과를 확인할 수 있다.
 # ============================================================
-import io
-import json
-
-import pandas as pd
 import streamlit as st
 from config import start_new_conversation
 from database.db_manager import (
     apply_target_conditions, format_target_summary,
 )
 from services.analysis_service import chart_spec_from
+from services.report_service import build_material
 from services.code_analyst import build_tables, run_analyst_turn, is_feedback_request, FEEDBACK_REQUEST_TEXT
 from ui.chart_render import render_chart_card
 from ui.chat_styles import inject_chat_css, render_message
@@ -38,13 +35,6 @@ def _render_steps(steps, checks):
             st.caption(":material/verified_user: 답변 검증 기록 - 실행 결과에 없는 숫자나 지어낸 결과는 거부하고 다시 요청했어요")
             for c in checks:
                 st.caption(f"· {c}")
-
-
-@st.cache_data(show_spinner=False, max_entries=20)
-def _excel_bytes(records_json):
-    buffer = io.BytesIO()
-    pd.DataFrame(json.loads(records_json)).to_excel(buffer, index=False, sheet_name="분석결과")
-    return buffer.getvalue()
 
 
 def _send_to_targeting(info, profile_df, db_audience):
@@ -70,9 +60,25 @@ def _send_to_targeting(info, profile_df, db_audience):
     st.rerun()
 
 
+def _send_to_report(i, turn):
+    """🌟 [분석 → 보고서 연결] 이 분석 답변(글+표)을 현재 보고서 대화에 '분석 자료'로 담는다. 보고서 대화에서
+    "취합안에 이 분석도 넣어줘"라고 하면 AI가 자료의 숫자를 그대로 옮겨 넣는다."""
+    question = next((m['text'] for m in reversed(st.session_state.analysis_messages[:i]) if m['role'] == 'user'), "분석 결과")
+    material = build_material(question, turn)
+    st.session_state.report_messages += [
+        {"role": "user", "text": f"[분석에서 가져옴] {material['제목']}"},
+        {"role": "assistant", "material": material,
+         "text": f"분석 자료를 담았어요: {material['제목']}. 취합안이나 보고서에 넣고 싶다고 말씀해 주세요(예: '이번 취합안에 이 분석도 넣어줘')."},
+    ]
+    st.session_state.report_greet_stream_pending = False
+    st.session_state.active_feature = 'report'
+    autosave_simple('report')
+    st.rerun()
+
+
 def _render_actions(i, turn, profile_df, db_audience):
-    """답변 말풍선 바로 아래의 알약 모양 액션 버튼 줄(그래프 보기/접기, 전체와 비교 피드백, 표 다운로드,
-    타겟팅으로 보내기). 그래프와 피드백은 실무자가 원할 때만 만든다. 모양은 ui/chat_styles.py의 hp-actions 스타일."""
+    """답변 말풍선 바로 아래의 알약 모양 액션 버튼 줄(그래프 보기/접기, 전체와 비교 피드백,
+    타겟팅으로 보내기, 보고서에 넣기). 그래프와 피드백은 실무자가 원할 때만 만든다. 모양은 ui/chat_styles.py의 hp-actions 스타일."""
     with st.container(horizontal=True, gap="small", key=f"hp-actions-{i}"):
         if turn.get("data"):
             showing = bool(turn.get("chart"))
@@ -86,17 +92,14 @@ def _render_actions(i, turn, profile_df, db_audience):
                 st.rerun()
             if st.button("전체와 비교 피드백", width="content", key=f"analysis_feedback_{i}", icon=":material/insights:"):
                 _ask(FEEDBACK_REQUEST_TEXT, feedback=True)
-        if turn.get("table"):
-            st.download_button(
-                "표 다운로드", data=_excel_bytes(json.dumps(turn["table"], ensure_ascii=False)),
-                file_name="분석결과.xlsx", key=f"analysis_dl_{i}", width="content", icon=":material/download:",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
         if turn.get("audience"):
             info = turn["audience"]
             if st.button(f"타겟팅으로 보내기 ({info['count']:,}명)", width="content", key=f"analysis_to_target_{i}",
                          icon=":material/send:"):
                 _send_to_targeting(info, profile_df, db_audience)
+        if turn.get("steps"):  # 실제로 계산한 분석 답변만 보고서 자료로 담을 수 있다
+            if st.button("보고서에 넣기", width="content", key=f"analysis_to_report_{i}", icon=":material/description:"):
+                _send_to_report(i, turn)
 
 
 def _ask(user_text, feedback=False):
@@ -126,7 +129,7 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
         render_message(turn["role"], turn["text"], animate=should_animate)
         if should_animate:
             st.session_state.analysis_stream_next = False
-        if turn.get("data") or turn.get("table") or turn.get("audience"):
+        if turn.get("data") or turn.get("table") or turn.get("audience") or turn.get("steps"):
             _render_actions(i, turn, profile_df, db_audience)
         render_chart_card(turn.get("chart"), f"analysis_chart_{i}")
         if turn.get("steps") or turn.get("checks"):

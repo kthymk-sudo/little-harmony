@@ -76,28 +76,56 @@ def _ask_again(history_with_user, first_reply, correction, so_reports_str=""):
     )
 
 
-def so_reports_context(reports):
-    """AI에게 재료로 주는 SO별 정리본 전문(제외된 SO는 이미 빠진 목록을 받는다)."""
-    return "\n\n".join(f"[{r['SO']} · {r['기간'] or '기간 미확인'}]\n{r['text']}" for r in reports)
+def build_material(question, turn, max_rows=60):
+    """분석 탭 답변(turn)을 보고서 재료로 만든다: 질문 + 답변 글 + 결과표(앞 max_rows행). 숫자는 분석에서 계산된 그대로다."""
+    rows = turn.get('table') or []
+    lines = []
+    if rows:
+        cols = list(rows[0])
+        lines = [" | ".join(cols)] + [" | ".join(str(r.get(c, '')) for c in cols) for r in rows[:max_rows]]
+        if len(rows) > max_rows:
+            lines.append(f"(표 전체 {len(rows)}행 중 {max_rows}행)")
+    return {"제목": question.strip()[:40], "본문": turn.get('text', '') + ("\n[표]\n" + "\n".join(lines) if lines else "")}
+
+
+def collect_materials(messages, excluded=()):
+    """대화에 담아 둔 분석 자료들. excluded는 취합에서 뺀 자료의 메시지 번호."""
+    return [{**m['material'], 'index': i} for i, m in enumerate(messages)
+            if m.get('material') and i not in set(excluded)]
+
+
+def so_reports_context(reports, materials=()):
+    """AI에게 재료로 주는 SO별 정리본 전문과 분석 자료(제외된 것은 이미 빠진 목록을 받는다)."""
+    text = "\n\n".join(f"[{r['SO']} · {r['기간'] or '기간 미확인'}]\n{r['text']}" for r in reports)
+    if materials:
+        text += "\n\n[분석 자료 - 분석 탭에서 시청 데이터를 직접 계산한 결과]\n" + "\n\n".join(f"<{m['제목']}>\n{m['본문']}" for m in materials)
+    return text
 
 
 def _reply_type(info, reply_text, user_text):
     """AI가 밝힌 답변유형(정리/의논/취합안). 빠졌으면 트리가 있는 답변은 SO 보고서 정리로 본다(긴 원문을 붙여넣었을 때도)."""
     kind = str(info.get('답변유형') or '').strip() if isinstance(info, dict) else ''
-    if kind in ('정리', '의논', '취합안'):
+    if kind in ('의논', '취합안'):
         return kind
     tree = parse_report_tree(reply_text)
-    return '정리' if tree and (isinstance(info, dict) or len(user_text) >= _LONG_PASTE_CHARS) else '의논'
+    if kind != '정리':
+        kind = '정리' if tree and (isinstance(info, dict) or len(user_text) >= _LONG_PASTE_CHARS) else '의논'
+    # SO 보고서 정리는 긴 원문을 붙여넣는 일이다. 짧은 요청에 SO 없이 트리가 나왔다면 AI가 유형을 잘못 밝힌 취합안이다
+    # (그대로 두면 "SO 미확인" 보고서로 쌓인다).
+    if kind == '정리' and tree and len(user_text) < _LONG_PASTE_CHARS and not (isinstance(info, dict) and info.get('SO')):
+        return '취합안'
+    return kind
 
 
-def process_report_turn(messages, user_text, profile_df, db_audience=None, db_content=None, excluded_so=()):
+def process_report_turn(messages, user_text, profile_df, db_audience=None, db_content=None, excluded_so=(), excluded_materials=()):
     """반환: (new_messages, chart_spec). chart_spec은 데이터 요청이 없었거나 계산 결과가 비었으면 None.
-    excluded_so: 취합에서 뺀 SO 이름들 - AI 재료에서도 뺀다."""
+    excluded_so / excluded_materials: 취합에서 뺀 SO 이름들 / 분석 자료의 메시지 번호 - AI 재료에서도 뺀다."""
     user_turn = {"role": "user", "text": user_text}
     history_with_user = _compact_history(messages) + [user_turn]
     profile_context_str = f"{summarize_profile_context(profile_df)}\n{data_period_str(db_audience)}"
     reports = [r for r in collect_so_reports(messages) if r['SO'] not in set(excluded_so)]
-    so_str = so_reports_context(reports)
+    materials = collect_materials(messages, excluded_materials)
+    so_str = so_reports_context(reports, materials)
 
     ai_raw = generate_report_reply(history_with_user, profile_context_str, so_str)
     reply_text, parsed = parse_target_conditions(ai_raw)
@@ -115,7 +143,7 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
                   "누락 의심 {n}건 → 다시 정리 요청: {items}",
                   "원문에 있는데 정리 결과에서 빠졌거나 바뀐 링크·숫자·문장이 있어: {items}. 원문 그대로 해당 항목에 넣어서 전체 트리를 처음부터 다시 정리해줘. 다른 내용은 바꾸지 마.")
     elif kind == '취합안' and parse_report_tree(reply_text):
-        source = "\n".join(r['text'] for r in reports)
+        source = "\n".join([r['text'] for r in reports] + [m['본문'] for m in materials])
         verify = (lambda t: find_missing_items(t, source),
                   "SO 보고서에 없는 값 {n}건 → 다시 작성 요청: {items}",
                   "취합안에 SO별 보고서에 없는 링크·숫자가 있어: {items}. SO별 보고서에 있는 값만 그대로 써서 전체 취합안을 처음부터 다시 작성해줘.")
@@ -245,7 +273,7 @@ def draft_is_stale(messages):
     if draft is None:
         return False
     after = messages[next(i for i, m in enumerate(messages) if m is draft) + 1:]
-    return any(m.get('report_meta') for m in after)
+    return any(m.get('report_meta') or m.get('material') for m in after)
 
 
 def merged_title(reports):
@@ -316,4 +344,27 @@ if __name__ == "__main__":
     m = process_report_turn(prior, "조회수 위주로 취합해줘", None, None, None)[0][-1]
     assert m.get('draft') and 'missing' not in m and m['checks'] and "999" in m['checks'][0] and m['text'] == ok, m
     assert latest_draft(prior + [m]) is m and latest_draft(prior) is None
+    # 분석 자료: 표는 앞 행만, 자료는 재료로 전달되고, 취합안의 숫자는 자료 본문과도 대조되며, 제외하면 빠진다. 자료가 나중에 담기면 취합안은 낡은 것
+    mat = build_material("6월 SO별 MAU", {"text": "대전 688명이 가장 많아요.", "table": [{"SO": "대전", "MAU": 688}, {"SO": "충청", "MAU": 71}]}, max_rows=1)
+    assert mat["제목"] == "6월 SO별 MAU" and "SO | MAU\n대전 | 688" in mat["본문"] and "충청" not in mat["본문"] and "2행 중 1행" in mat["본문"], mat
+    note = {"role": "assistant", "text": "담았어요", "material": mat}
+    with_mat = prior + [note]
+    assert [m["index"] for m in collect_materials(with_mat)] == [2] and collect_materials(with_mat, excluded=[2]) == []
+    assert "[분석 자료" in so_reports_context([], collect_materials(with_mat)) and "[분석 자료" not in so_reports_context([], [])
+    calls.clear(); ok2 = "📌 취합\n  ▸ 시청 데이터\n    · 대전 688명"
+    replies = iter([ok2 + tail]); m = process_report_turn(with_mat, "MAU도 넣어서 취합안 만들어줘", None, None, None)[0][-1]
+    assert m.get('draft') and 'missing' not in m and "688" in calls[0][1] and "[분석 자료" in calls[0][1], m
+    calls.clear(); replies = iter([ok2.replace("688", "999") + tail, ok2.replace("688", "999") + tail])
+    assert 'missing' in process_report_turn(with_mat, "MAU도 넣어서 취합안 만들어줘", None, None, None)[0][-1]
+    calls.clear(); replies = iter(["📌 취합" + tail])  # 자료를 뺐으니 688은 근거가 없다 - 숫자 없는 답만 받는다
+    process_report_turn(with_mat, "MAU도 넣어서 취합안 만들어줘", None, None, None, excluded_materials=[2])
+    assert "[분석 자료" not in calls[0][1]
+    assert draft_is_stale([{"role": "assistant", "text": "📌 취합", "draft": True}, note]) and not draft_is_stale([note, {"role": "assistant", "text": "📌 취합", "draft": True}])
+    # AI가 유형을 "정리"로 잘못 밝혀도 짧은 요청에 SO 없이 나온 트리는 취합안이다(SO 미확인 보고서로 쌓이지 않게). 긴 원문이면 정리
+    mislabeled = '\n```json\n{"보고서정보": {"답변유형": "정리", "SO": "", "기간": ""}}\n```'
+    calls.clear(); replies = iter([ok2 + mislabeled])
+    m = process_report_turn(with_mat, "취합안 만들어줘", None, None, None)[0][-1]
+    assert m.get('draft') and 'report_meta' not in m, m
+    calls.clear(); replies = iter([good + mislabeled])
+    assert process_report_turn([], source, None, None, None)[0][-1].get('report_meta') is not None
     print("report_service self-check OK")

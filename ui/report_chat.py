@@ -8,7 +8,9 @@
 import re
 
 import streamlit as st
-from services.report_service import process_report_turn, collect_so_reports, merged_title, region_status, latest_draft, draft_is_stale
+from services.report_service import (
+    process_report_turn, collect_so_reports, collect_materials, merged_title, region_status, latest_draft, draft_is_stale,
+)
 from ui.chart_render import render_chart_card
 from ui.chat_styles import inject_chat_css, render_message
 from ui.target_card import autosave_simple
@@ -28,11 +30,20 @@ def _excluded_so(messages):
     return [r['SO'] for r in collect_so_reports(messages) if st.session_state.get(_use_key(r['SO'])) is False]
 
 
+def _material_key(index):
+    return f"mat_use_{st.session_state.get('report_current_conversation_id')}_{index}"
+
+
+def _excluded_materials(messages):
+    """체크박스에서 뺀 분석 자료의 메시지 번호."""
+    return [m['index'] for m in collect_materials(messages) if st.session_state.get(_material_key(m['index'])) is False]
+
+
 def _render_merge_panel(messages):
     """정리된 SO 현황을 보여주고, 최종 알마인드 파일을 딱 하나 내려받게 한다.
     대화로 만든 취합안(draft)이 있으면 그것을, 없으면 SO별로 가지 하나씩 묶은 기본 취합을 쓴다(같은 SO를 다시 붙여넣었으면 나중 것)."""
-    reports = collect_so_reports(messages)
-    if not reports:
+    reports, materials = collect_so_reports(messages), collect_materials(messages)
+    if not reports and not materials:
         return
     status, extra = region_status(reports)
     with st.container(border=True):
@@ -51,6 +62,11 @@ def _render_merge_panel(messages):
         if any(r['SO'].startswith("SO 미확인") for r in reports):
             st.caption(":material/warning: SO를 알 수 없는 보고서가 있어요. 그 보고서를 다시 붙여넣으며 'OO 보고서야'라고 SO를 알려주세요.")
 
+        if materials:
+            for m in materials:
+                st.checkbox(f"분석 자료 · {m['제목']}", value=True, key=_material_key(m['index']))
+            st.caption("분석 자료는 대화로 취합안을 만들 때 반영돼요(\"이번 취합안에 이 분석도 넣어줘\"). SO별 기본 취합에는 들어가지 않아요.")
+
         draft = latest_draft(messages)
         use_draft = False
         if draft:
@@ -58,7 +74,7 @@ def _render_merge_panel(messages):
                               key=f"final_choice_{st.session_state.get('report_current_conversation_id')}")
             use_draft = choice.startswith("대화로")
             if use_draft and draft_is_stale(messages):
-                st.warning("취합안을 만든 뒤 SO 보고서가 새로 정리되거나 교체됐어요. 그 내용은 이 취합안에 반영되지 않았으니, "
+                st.warning("취합안을 만든 뒤 SO 보고서나 분석 자료가 새로 담기거나 교체됐어요. 그 내용은 이 취합안에 반영되지 않았으니, "
                            "대화로 '취합안 다시 만들어줘'라고 요청해 주세요.", icon=":material/warning:")
         if use_draft:
             nodes = parse_report_tree(draft['text'])
@@ -121,6 +137,7 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
             new_messages, _ = process_report_turn(
                 st.session_state.report_messages[:-1], pending, profile_df, db_audience, db_content,
                 excluded_so=_excluded_so(st.session_state.report_messages[:-1]),
+                excluded_materials=_excluded_materials(st.session_state.report_messages[:-1]),
             )
             st.session_state.report_messages = new_messages
         st.session_state.report_stream_next = True
