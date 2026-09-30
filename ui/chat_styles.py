@@ -266,6 +266,17 @@ _CHAT_CSS = """
     box-shadow: 0 2px 12px rgba(21, 33, 66, 0.08);
 }
 
+/* ---------- 알마인드 미리보기(SVG) ---------- */
+.hp-mindmap {
+    overflow: auto;
+    max-height: 520px;
+    padding: 10px;
+    border: 1px solid #E3E8F2;
+    border-radius: 12px;
+    background: #FBFDF6;
+}
+.hp-mindmap svg { display: block; }
+
 /* ---------- 채팅 말풍선 ---------- */
 .hp-chat-row { display: flex; margin: 10px 0; animation: hp-fade-in 0.25s ease; }
 .hp-chat-row.hp-user { justify-content: flex-end; }

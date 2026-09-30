@@ -88,6 +88,15 @@ def save_conversation(conv_id, title, phase, messages, conditions, stats, member
         return False
 
 
+def save_simple_conversation(conv_id, feature, messages):
+    """분석/보고서 탭(phase·조건·타겟이 없는 단순 챗)의 대화를 저장한다. 화면과 백그라운드 작업 스레드 양쪽에서 쓴다."""
+    first_user_text = next((m['text'] for m in messages if m['role'] == 'user'), "")
+    return save_conversation(
+        conv_id=conv_id, title=make_conversation_title(first_user_text, feature=feature), phase='', messages=messages,
+        conditions={}, stats={}, member_ids=[], reasoning="", push_copy="", feature=feature,
+    )
+
+
 def rename_conversation(conv_id, new_title):
     try:
         conn = _connect()

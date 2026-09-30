@@ -15,6 +15,9 @@ from services.report_service import (
 from utils.file_reader import FILE_TYPES
 from ui.chart_render import render_chart_card
 from ui.chat_styles import inject_chat_css, render_message
+from database.db_manager import save_simple_conversation
+from ui import job_runner
+from utils.mindmap_svg import mindmap_svg
 from ui.target_card import autosave_simple
 from utils.emm_export import build_emm_from_nodes, merge_report_trees, parse_report_tree
 
@@ -89,6 +92,22 @@ def _render_merge_panel(messages):
                            mime="application/octet-stream", key="emm_final")
 
 
+def _has_tree(turn):
+    return turn["role"] == "assistant" and len(parse_report_tree(turn["text"])) >= 3
+
+
+def _render_preview(text, expanded):
+    """🌟 [알마인드 미리보기] 트리 답변을 알마인드 가지형처럼 그림으로 보여준다(파일을 열어 보지 않고도 모양을 알 수 있게)."""
+    nodes = parse_report_tree(text)
+    svg, hidden = mindmap_svg(nodes)
+    if not svg:
+        return
+    with st.expander(f"알마인드 미리보기 ({len(nodes)}개 항목)", icon=":material/account_tree:", expanded=expanded):
+        st.markdown(f'<div class="hp-mindmap">{svg}</div>', unsafe_allow_html=True)
+        st.caption("알마인드에서 열었을 때의 모양을 비슷하게 그린 그림이에요(글꼴·간격은 조금 달라요)."
+                   + (f" 3단계까지만 그렸고, 더 깊은 {hidden}개 항목은 파일에 들어 있어요." if hidden else ""))
+
+
 def render_report_chat(profile_df, db_audience=None, db_content=None):
     inject_chat_css()
 
@@ -106,16 +125,19 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
         st.session_state.report_greet_stream_pending = False
 
     last_idx = len(st.session_state.report_messages) - 1
+    last_tree_idx = next((i for i in range(last_idx, -1, -1) if _has_tree(st.session_state.report_messages[i])), -1)
     for i, turn in enumerate(st.session_state.report_messages):
         should_animate = (i == last_idx and turn["role"] == "assistant" and st.session_state.get('report_stream_next'))
         render_message(turn["role"], turn["text"], animate=should_animate)
         if should_animate:
             st.session_state.report_stream_next = False
+        if _has_tree(turn):   # 가장 최근 트리는 펼쳐서, 지난 것은 접어서 보여준다
+            _render_preview(turn["text"], expanded=(i == last_tree_idx))
         render_chart_card(turn.get("chart"), f"report_chart_{i}")
 
         if turn.get("missing"):  # 대조에서 다시 정리해도 남은 문제 - 숨기지 않고 알린다
             if turn.get("missing_kind") == "취합안":
-                st.warning("다음 링크·숫자가 SO별 보고서에서 확인되지 않거나 이전 취합안에서 빠졌어요. 최종본에 넣기 전에 확인해 주세요: "
+                st.warning("취합안에서 확인이 필요한 항목이에요(SO 보고서에 없는 링크·숫자, 이전 안에서 빠진 값, 요청과 다른 구성). 최종본에 넣기 전에 확인해 주세요: "
                            + ", ".join(turn["missing"][:12]), icon=":material/warning:")
             else:
                 st.warning("원문에 있는 다음 링크·숫자·문장이 정리 결과에서 확인되지 않아요. 원문과 대조해 주세요: "
@@ -129,24 +151,39 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
 
     _render_merge_panel(st.session_state.report_messages)
 
+    conv_id = st.session_state.report_current_conversation_id
     pending = st.session_state.pop('report_pending', None)
     if pending:
-        earlier = st.session_state.report_messages[:-1]
-        attachments, failed = [], []
-        if pending['files']:
-            with st.spinner("첨부 파일을 읽는 중... (사진·PDF는 글자를 읽느라 조금 걸려요)"):
+        # 🌟 답변 만들기는 백그라운드로 돈다 - 끝나기 전에 다른 탭·대화로 넘어가도 끊기지 않고 대화에 저장된다(ui/job_runner.py)
+        earlier = list(st.session_state.report_messages[:-1])
+        excluded_so, excluded_materials = _excluded_so(earlier), _excluded_materials(earlier)
+
+        def work(job):
+            attachments, failed = [], []
+            if pending['files']:
+                job.progress = "첨부 파일을 읽는 중... (사진·PDF는 글자를 읽느라 조금 걸려요)"
                 attachments, failed = read_attachments(pending['files'])
-        notice = {"role": "assistant", "text": "읽지 못한 첨부 파일이 있어요:\n" + "\n".join(f"· {f}" for f in failed)} if failed else None
-        if not pending['text'] and not attachments:  # 파일만 올렸는데 하나도 못 읽었으면 AI를 부를 것이 없다
-            st.session_state.report_messages = st.session_state.report_messages + [notice]
+            notice = [{"role": "assistant", "text": "읽지 못한 첨부 파일이 있어요:\n" + "\n".join(f"· {f}" for f in failed)}] if failed else []
+            if not pending['text'] and not attachments:  # 파일만 올렸는데 하나도 못 읽었으면 AI를 부를 것이 없다
+                return earlier + [{"role": "user", "text": pending['display']}] + notice
+            job.progress = "보고서를 정리하는 중... (원문과 대조하는 중이라 조금 걸려요)"
+            new_messages, _ = process_report_turn(
+                earlier, pending['text'], profile_df, db_audience, db_content,
+                excluded_so=excluded_so, excluded_materials=excluded_materials,
+                attachments=attachments, display_text=pending['display'],
+            )
+            return new_messages + notice
+
+        job_runner.start(conv_id, work, persist=lambda msgs: save_simple_conversation(conv_id, 'report', msgs), label="보고서를 정리하는 중...")
+
+    outcome = job_runner.wait_for(conv_id)
+    if outcome:
+        status, value = outcome
+        if status == "ok":
+            st.session_state.report_messages = value
         else:
-            with st.spinner("보고서를 정리하는 중... (원문과 대조하는 중이라 조금 걸려요)"):
-                new_messages, _ = process_report_turn(
-                    earlier, pending['text'], profile_df, db_audience, db_content,
-                    excluded_so=_excluded_so(earlier), excluded_materials=_excluded_materials(earlier),
-                    attachments=attachments, display_text=pending['display'],
-                )
-            st.session_state.report_messages = new_messages + ([notice] if notice else [])
+            st.session_state.report_messages = st.session_state.report_messages + [
+                {"role": "assistant", "text": f"⚠️ 보고서를 정리하는 중 오류가 생겼어요. 다시 시도해 주세요. ({type(value).__name__})"}]
         st.session_state.report_stream_next = True
         autosave_simple('report')
         st.rerun()

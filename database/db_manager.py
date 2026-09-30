@@ -25,5 +25,5 @@ from database.audience import (
 from database.formatting import format_conditions_line, format_target_summary
 from database.conversation_store import (
     new_conversation_id, make_conversation_title, save_conversation, rename_conversation,
-    list_conversations, load_conversation, delete_conversation,
+    list_conversations, load_conversation, delete_conversation, save_simple_conversation,
 )

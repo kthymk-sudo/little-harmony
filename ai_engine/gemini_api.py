@@ -233,7 +233,7 @@ def read_file_text(data, mime_type):
               "글자가 거의 없는 사진이면 보이는 것을 사실만 짧게 설명해. 인사말이나 설명 없이 옮긴 내용만 출력해.")
     return _call_gemini_api(prompt, temperature=0.1, files=[(mime_type, base64.b64encode(data).decode("ascii"))])
 
-def generate_report_reply(chat_history, profile_context_str, so_reports_str=""):
+def generate_report_reply(chat_history, profile_context_str, so_reports_str="", draft_str=""):
     chat_history_str = _format_chat_history(chat_history)
-    prompt = get_report_prompt(chat_history_str, profile_context_str, so_reports_str)
+    prompt = get_report_prompt(chat_history_str, profile_context_str, so_reports_str, draft_str)
     return _call_gemini_api(prompt, temperature=0.2)  # 원문을 빠짐없이 옮기는 정리가 기본이라 낮게

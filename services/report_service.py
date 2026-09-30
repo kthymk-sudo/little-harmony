@@ -77,9 +77,9 @@ def _compact_history(messages):
     return out
 
 
-def _ask_again(history_with_user, first_reply, correction, so_reports_str=""):
+def _ask_again(history_with_user, first_reply, correction, so_reports_str="", draft_str=""):
     return generate_report_reply(
-        history_with_user + [{"role": "assistant", "text": first_reply}, {"role": "user", "text": correction}], "", so_reports_str,
+        history_with_user + [{"role": "assistant", "text": first_reply}, {"role": "user", "text": correction}], "", so_reports_str, draft_str,
     )
 
 
@@ -122,8 +122,27 @@ def so_reports_context(reports, materials=()):
     return text
 
 
-def _reply_type(info, reply_text, user_text):
-    """AI가 밝힌 답변유형(정리/의논/취합안). 빠졌으면 트리가 있는 답변은 SO 보고서 정리로 본다(긴 원문을 붙여넣었을 때도)."""
+_SO_FIRST = re.compile(r"SO[를을가이는은]?\s*.{0,8}(가장 큰|제일 큰|최상위|맨 앞|가장 앞|먼저|첫|1단계|큰 가지|큰 주제|상위)"
+                       r"|(가장 큰|최상위|맨 앞|큰 가지|큰 주제)\s*.{0,8}SO")   # "SO가 가장 큰 가지", "SO 먼저", "SO를 최상위로"
+
+
+def _so_first(tree_text, so_names):
+    """취합안의 1단계 가지가 (거의 다) SO 이름인지."""
+    firsts = [t for d, t in parse_report_tree(tree_text) if d == 1]
+    return bool(firsts) and sum(any(n in t for n in so_names) for t in firsts) >= 0.8 * len(firsts)
+
+
+def _last_tree_is_draft(messages):
+    """대화에서 가장 최근에 만들어진 트리가 취합안인지(그렇다면 짧은 구성 변경 요청은 그 취합안을 고치는 일이다)."""
+    for m in reversed(messages):
+        if m.get('draft') or m.get('report_meta'):
+            return bool(m.get('draft'))
+    return False
+
+
+def _reply_type(info, reply_text, user_text, draft_context=False):
+    """AI가 밝힌 답변유형(정리/의논/취합안). 빠졌으면 트리가 있는 답변은 SO 보고서 정리로 본다(긴 원문을 붙여넣었을 때도).
+    draft_context: 가장 최근 트리가 취합안이면 짧은 요청에서 나온 트리는 SO 보고서 정리가 아니라 그 취합안의 수정으로 본다."""
     kind = str(info.get('답변유형') or '').strip() if isinstance(info, dict) else ''
     if kind in ('의논', '취합안'):
         return kind
@@ -132,7 +151,7 @@ def _reply_type(info, reply_text, user_text):
         kind = '정리' if tree and (isinstance(info, dict) or len(user_text) >= _LONG_PASTE_CHARS) else '의논'
     # SO 보고서 정리는 긴 원문을 붙여넣는 일이다. 짧은 요청에 SO 없이 트리가 나왔다면 AI가 유형을 잘못 밝힌 취합안이다
     # (그대로 두면 "SO 미확인" 보고서로 쌓인다).
-    if kind == '정리' and tree and len(user_text) < _LONG_PASTE_CHARS and not (isinstance(info, dict) and info.get('SO')):
+    if kind == '정리' and tree and len(user_text) < _LONG_PASTE_CHARS and (draft_context or not (isinstance(info, dict) and info.get('SO'))):
         return '취합안'
     return kind
 
@@ -152,11 +171,14 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
     materials = collect_materials(messages, excluded_materials)
     so_str = so_reports_context(reports, materials)
 
-    ai_raw = generate_report_reply(history_with_user, profile_context_str, so_str)
+    prev = latest_draft(messages)
+    draft_str = _tree_part(prev['text']) if prev else ""   # 구성 변경 요청은 이 취합안을 고치는 것이라 AI에게 따로 보여 준다
+
+    ai_raw = generate_report_reply(history_with_user, profile_context_str, so_str, draft_str)
     reply_text, parsed = parse_target_conditions(ai_raw)
     parsed = parsed or {}
     info = parsed.get('보고서정보')
-    kind = _reply_type(info, reply_text, ai_text)
+    kind = _reply_type(info, reply_text, ai_text, draft_context=_last_tree_is_draft(messages) and not attachments)
     checks = []
     missing = []
 
@@ -170,19 +192,23 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
     elif kind == '취합안' and parse_report_tree(reply_text):
         source = "\n".join([r['text'] for r in reports] + [m['본문'] for m in materials] + [a['본문'] for a in attachments])
         # 결과의 링크·숫자는 SO 보고서(와 분석 자료)에 있어야 하고, 구성만 바꾸는 요청이면 이전 취합안의 링크·숫자도 그대로여야 한다
-        prev = latest_draft(messages)
-        prev_tree = _tree_part(prev['text']) if prev and not _CONTENT_CHANGE.search(user_text) else ""
-        verify = (lambda t: list(dict.fromkeys(find_missing_items(_tree_part(t), source) + (find_missing_items(prev_tree, _tree_part(t)) if prev_tree else []))),
+        prev_tree = draft_str if not _CONTENT_CHANGE.search(user_text) else ""
+        so_names = [r['SO'] for r in reports] + list(SO_REGIONS)
+        wants_so_first = bool(_SO_FIRST.search(user_text))   # "SO가 가장 큰 가지"를 요청했는데 1단계가 SO 이름이 아니면 다시 시킨다
+        verify = (lambda t: list(dict.fromkeys(
+                      find_missing_items(_tree_part(t), source) + (find_missing_items(prev_tree, _tree_part(t)) if prev_tree else [])
+                      + (["구성: 1단계 가지가 SO 이름이 아님"] if wants_so_first and not _so_first(_tree_part(t), so_names) else []))),
                   "취합안 대조 {n}건 → 다시 작성 요청: {items}",
                   "취합안에 문제가 있어: {items}. 링크·숫자는 SO별 보고서(와 분석 자료)에 있는 값만 그대로 써. 구성만 바꾸는 요청이면 "
-                  "이전 취합안에 있던 링크·숫자는 빠뜨리지 마. 전체 취합안을 처음부터 다시 작성해줘.")
+                  "이전 취합안에 있던 링크·숫자는 빠뜨리지 마. '구성'이 문제라면 실무자가 요청한 대로 1단계 가지(▸)가 SO 이름(대전, 광주 …)이고 "
+                  "주요내용은 그 아래 2단계(·)가 되게 바꿔. 전체 취합안을 [현재 취합안]의 내용 그대로 처음부터 다시 작성해줘.")
     if verify:
         check, note, fix = verify
         missing = check(reply_text)
         if missing:
             items = ", ".join(missing[:_MAX_MISSING_SHOWN])
             checks.append(note.format(n=len(missing), items=items))
-            retry_raw = _ask_again(history_with_user, reply_text, fix.format(items=items), so_str)
+            retry_raw = _ask_again(history_with_user, reply_text, fix.format(items=items), so_str, draft_str)
             if not is_api_error(retry_raw):
                 retry_text, retry_parsed = parse_target_conditions(retry_raw)
                 retry_missing = check(retry_text) if parse_report_tree(retry_text) else missing
@@ -321,7 +347,7 @@ if __name__ == "__main__":
     calls = []
     replies = iter([bad + '\n```json\n{"데이터요청": {}, "보고서정보": {"SO": "대전", "기간": "9월 4주차"}}\n```',
                     good + '\n```json\n{"데이터요청": {}, "보고서정보": {"SO": "대전", "기간": "9월 4주차"}}\n```'])
-    globals()['generate_report_reply'] = lambda history, ctx, so='': calls.append((history, so)) or next(replies)
+    globals()['generate_report_reply'] = lambda history, ctx, so='', draft='': calls.append((history, so, draft)) or next(replies)
     globals()['summarize_profile_context'] = lambda p: ""
     msgs, chart = process_report_turn([], source, None, None, None)
     reply = msgs[-1]
@@ -417,6 +443,21 @@ if __name__ == "__main__":
     calls.clear(); replies = iter([good + '\n```json\n{"보고서정보": {"답변유형": "정리", "SO": "대전"}}\n```'] * 2)
     out = process_report_turn([], "대전 보고서야", None, None, None, attachments=src_att * 8)[0]  # 원문(첨부)이 길면 대조 검사를 한다
     assert out[-1].get('report_meta') and all(m.get('material') is None for m in out), out
+
+    # "SO가 가장 큰 가지": 요청 표현을 알아보고, 1단계가 SO 이름이 아니면 다시 시키며, 현재 취합안을 AI에게 보여 주고, 취합안 뒤의 짧은 요청은 정리가 아니라 수정이다
+    assert all(_SO_FIRST.search(t) for t in ("SO가 가장 큰 가지가 되게해줘", "SO를 최상위로", "SO 먼저 나누고 그 아래에 주요내용으로", "가장 큰 가지는 SO로"))
+    assert not any(_SO_FIRST.search(t) for t in ("주요내용 기준으로 먼저 나누고 그 아래에 SO별로", "조회수를 맨 위로"))
+    assert _so_first("📌 취합\n  ▸ 대전\n    · 조회수\n  ▸ 광주 SO\n    · 조회수", ["대전", "광주"]) and not _so_first("📌 취합\n  ▸ 조회수\n    · 대전", ["대전", "광주"])
+    topic_first = "📌 취합\n  ▸ 조회수\n    · 대전 : 14회 → 70회\n    · 광주 : 13개소"
+    so_first = "📌 취합\n  ▸ 대전\n    · 조회수\n      - 14회 → 70회\n  ▸ 광주\n    · 조회수\n      - 13개소"
+    base = prior + [{"role": "assistant", "text": topic_first + "\n\n구성 메모: 묶음", "draft": True}]
+    calls.clear(); replies = iter([topic_first + tail, so_first + tail])
+    m = process_report_turn(base, "SO가 가장 큰 가지가 되게해줘", None, None, None)[0][-1]
+    assert len(calls) == 2 and "구성: 1단계" in calls[1][0][-1]['text'] and "14회" in calls[0][2] and "구성 메모" not in calls[0][2], calls
+    assert m['draft'] and m['text'].startswith(so_first) and 'missing' not in m, m
+    calls.clear(); replies = iter([good + '\n```json\n{"보고서정보": {"답변유형": "정리", "SO": "대전"}}\n```'])   # AI가 취합안 수정을 SO 정리로 잘못 밝혀도
+    m = process_report_turn(base, "순서를 바꿔줘", None, None, None)[0][-1]
+    assert m.get('draft') and 'report_meta' not in m, m
 
     mislabeled ='\n```json\n{"보고서정보": {"답변유형": "정리", "SO": "", "기간": ""}}\n```'
     calls.clear(); replies = iter([ok2 + mislabeled])

@@ -10,7 +10,7 @@ from ai_engine.gemini_api import generate_target_reasoning, is_api_error
 from services.copy_service import is_over_limit, SHORTEN_REQUEST
 from database.db_manager import (
     apply_target_conditions, format_target_summary, format_conditions_line,
-    save_conversation, make_conversation_title,
+    save_conversation, make_conversation_title, save_simple_conversation,
 )
 
 
@@ -45,13 +45,8 @@ def autosave():
 
 def autosave_simple(feature):
     """분석/보고서 탭 자동저장(phase·조건·타겟이 없는 단순 챗). 상태 키: '{feature}_messages', '{feature}_current_conversation_id'."""
-    messages = st.session_state[f"{feature}_messages"]
-    first_user_text = next((m['text'] for m in messages if m['role'] == 'user'), "")
-    if not save_conversation(
-        conv_id=st.session_state[f"{feature}_current_conversation_id"],
-        title=make_conversation_title(first_user_text, feature=feature),
-        phase='', messages=messages, conditions={}, stats={}, member_ids=[], reasoning="", push_copy="",
-        feature=feature,
+    if not save_simple_conversation(
+        st.session_state[f"{feature}_current_conversation_id"], feature, st.session_state[f"{feature}_messages"],
     ):
         st.session_state.save_failed = True  # main.py가 다음 화면에서 경고를 띄운다
 

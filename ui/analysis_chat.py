@@ -11,12 +11,11 @@
 # ============================================================
 import streamlit as st
 from config import start_new_conversation
-from database.db_manager import (
-    apply_target_conditions, format_target_summary,
-)
+from database.db_manager import apply_target_conditions, format_target_summary, save_simple_conversation
 from services.analysis_service import chart_spec_from
 from services.report_service import build_material
 from services.code_analyst import build_tables, run_analyst_turn, is_feedback_request, FEEDBACK_REQUEST_TEXT
+from ui import job_runner
 from ui.chart_render import render_chart_card
 from ui.chat_styles import inject_chat_css, render_message
 from ui.target_card import autosave as autosave_targeting, autosave_simple
@@ -135,23 +134,31 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
         if turn.get("steps") or turn.get("checks"):
             _render_steps(turn.get("steps") or [], turn.get("checks") or [])
 
+    conv_id = st.session_state.analysis_current_conversation_id
     if st.session_state.get('analysis_pending_user_text'):
         pending = st.session_state.pop('analysis_pending_user_text')
         feedback = st.session_state.pop('analysis_pending_feedback', False) or is_feedback_request(pending)
-        with st.status("분석을 시작하는 중...", expanded=False) as status:
+        # 🌟 분석은 백그라운드로 돈다 - 끝나기 전에 다른 탭·대화로 넘어가도 끊기지 않고 대화에 저장된다(ui/job_runner.py)
+        base = list(st.session_state.analysis_messages)   # 방금 물은 사용자 말풍선까지 들어 있다
+
+        def work(job):
             def _on_step(number, description):
-                status.update(label=f"{number}단계 계산 중 · {description}")
+                job.progress = f"{number}단계 계산 중 · {description}"
 
             try:
                 tables = build_tables(db_audience, db_content, profile_df)
-                reply = run_analyst_turn(
-                    st.session_state.analysis_messages[:-1], pending, tables, on_step=_on_step, feedback=feedback,
-                )
-                status.update(label="분석 완료", state="complete")
+                reply = run_analyst_turn(base[:-1], pending, tables, on_step=_on_step, feedback=feedback)
             except Exception as e:  # 예상 못한 오류가 나도 질문에 답이 남도록(화면 전체가 멈추지 않게)
                 reply = {"role": "assistant", "text": f"⚠️ 분석 중 오류가 생겼어요. 질문을 조금 바꿔서 다시 시도해주세요. ({type(e).__name__})"}
-                status.update(label="분석 중 오류", state="error")
-        st.session_state.analysis_messages.append(reply)
+            return base + [reply]
+
+        job_runner.start(conv_id, work, persist=lambda msgs: save_simple_conversation(conv_id, 'analysis', msgs), label="분석을 시작하는 중...")
+
+    outcome = job_runner.wait_for(conv_id)
+    if outcome:
+        status, value = outcome
+        st.session_state.analysis_messages = value if status == "ok" else st.session_state.analysis_messages + [
+            {"role": "assistant", "text": f"⚠️ 분석 중 오류가 생겼어요. 질문을 조금 바꿔서 다시 시도해주세요. ({type(value).__name__})"}]
         st.session_state.analysis_stream_next = True
         autosave_simple('analysis')
         st.rerun()
