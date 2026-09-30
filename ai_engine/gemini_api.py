@@ -238,7 +238,7 @@ def generate_code_analyst_step(prompt):
     """📊 분석 탭 코드 실행형: 한 단계(코드 또는 최종 답변). 프롬프트는 services/code_analyst.py가 조립한다."""
     return _call_gemini_api(prompt, temperature=0.2)
 
-def generate_report_reply(chat_history, profile_context_str):
+def generate_report_reply(chat_history, profile_context_str, so_reports_str=""):
     chat_history_str = _format_chat_history(chat_history)
-    prompt = get_report_prompt(chat_history_str, profile_context_str)
-    return _call_gemini_api(prompt, temperature=0.5)
+    prompt = get_report_prompt(chat_history_str, profile_context_str, so_reports_str)
+    return _call_gemini_api(prompt, temperature=0.2)  # 원문을 빠짐없이 옮기는 정리가 기본이라 낮게

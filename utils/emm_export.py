@@ -63,27 +63,61 @@ def _new_uuid():
     return "{%s}" % str(uuid.uuid4()).upper()
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f﻿]")  # XML에 넣을 수 없는 글자(원문 복사 때 섞여 들어올 수 있음)
+
+
 def _xml_escape(text):
+    text = _CONTROL_CHARS.sub("", text)
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
+_LEADING_BULLET = re.compile(r"^(?:[▸·\-•▪◦‣∙○●■⇒:]\s+)+")
+_MARKER_DEPTH = {"▸": 1, "·": 2}   # 그 밖의 항목 기호(-, •, ▪ 등)는 들여쓰기로 단계를 정한다(기본 3단계)
+_ITEM_MARKERS = "▸·-•▪◦‣∙"
+
+
 def parse_report_tree(report_text):
-    """보고서 답변 텍스트(📌/▸/· 들여쓰기 트리 + 피드백)에서 트리 부분만 뽑아
-    [(depth, text), ...] 리스트로 변환한다. 피드백/데이터 인사이트 문단은 제외."""
-    tree_lines = []
-    for line in report_text.splitlines():
-        stripped = line.strip()
+    """보고서 답변 텍스트(📌 중심 + 들여쓰기 항목 트리 + 피드백)에서 트리 부분만 뽑아
+    [(depth, text), ...] 리스트로 변환한다. 피드백/데이터 인사이트 문단은 제외.
+
+    🌟 [깊은 단계] 예전에는 📌/▸/· 세 단계만 인식했다. 활동 보고서처럼 항목 아래 세부·부가 설명이 여러
+    겹인 내용을 그대로 옮길 수 있도록, 두 칸 들여쓰기 하나가 한 단계로 인식한다(들여쓰기가 없으면 예전처럼
+    ▸=1단계, ·=2단계). 앞 줄보다 두 단계 이상 깊어지는 줄은 한 단계만 깊어지게 맞춘다 - 가지가 끊겨 사라지지 않게."""
+    nodes = []
+    prev_depth = -1
+    for raw in report_text.splitlines():
+        line = raw.replace("\t", "    ").rstrip()
+        stripped = line.strip().lstrip("﻿")
         if not stripped:
             continue
         if stripped.startswith("💡") or stripped.startswith("📊"):
             break
         if stripped.startswith("📌"):
-            tree_lines.append((0, stripped.lstrip("📌").strip()))
-        elif stripped.startswith("▸"):
-            tree_lines.append((1, stripped.lstrip("▸").strip()))
-        elif stripped.startswith("·"):
-            tree_lines.append((2, stripped.lstrip("·").strip()))
-    return tree_lines
+            depth, text = 0, stripped[1:].strip()
+        elif stripped[0] in _ITEM_MARKERS:
+            indent = len(line) - len(line.lstrip())
+            text = stripped[1:].strip()
+            depth = indent // 2 if indent >= 2 else _MARKER_DEPTH.get(stripped[0], 3)
+        else:
+            continue
+        text = _LEADING_BULLET.sub("", text)  # 원문 머리표가 항목 기호와 겹쳐 남은 것("- - 목적", "· ▪ 값")은 지운다
+        if not text:
+            continue
+        depth = max(0, min(depth, prev_depth + 1))
+        if depth == 0 and prev_depth >= 0 and not stripped.startswith("📌"):
+            depth = 1
+        nodes.append((depth, text))
+        prev_depth = depth
+    return nodes
+
+
+def merge_report_trees(trees):
+    """여러 SO의 트리([(depth, text), ...] 목록)를 한 트리로 합친다. 각 트리의 📌 중심이 나란히 놓이고,
+    build_emm_from_nodes가 그 위에 공통 중심토픽을 만들어 SO마다 1단계 가지가 된다."""
+    merged = []
+    for nodes in trees:
+        merged.extend(nodes)
+    return merged
 
 
 def _mm(value):
@@ -193,7 +227,12 @@ def _patch_docprops(app_xml, core_xml, title, topic_count):
 
 def build_emm_bytes(report_text, title):
     """보고서 답변 텍스트를 가지형 알마인드(.emm) 파일 바이트로 변환한다."""
-    tree_nodes = parse_report_tree(report_text)
+    return build_emm_from_nodes(parse_report_tree(report_text), title)
+
+
+def build_emm_from_nodes(tree_nodes, title):
+    """[(depth, text), ...] 트리를 가지형 알마인드(.emm) 파일 바이트로 변환한다.
+    📌(depth 0)가 하나뿐이면 그 문구가 중심토픽, 여러 개면 title이 중심토픽이 되고 각 📌가 1단계 가지가 된다."""
     if not tree_nodes:
         raise ValueError("보고서에서 트리 요약을 찾지 못해 알마인드 파일을 만들 수 없습니다.")
 
@@ -236,4 +275,27 @@ if __name__ == "__main__":
     assert map1.count('m:fiberCatalog="RoundedElbow"') == 5
     assert map1.count("<m:element m:id=\"1\"") == 5
     assert '<m:charshape m:id="4" m:size="12pt"' in shape and '<m:charshape m:id="5" m:size="9pt"' in shape
+
+    def texts_of(emm_bytes):
+        with zipfile.ZipFile(io.BytesIO(emm_bytes)) as z:
+            m1 = z.read("map/maps/map1.xml").decode("utf-8")
+            ET.fromstring(m1)
+            return re.findall(r"<m:char>(.*?)</m:char>", m1)
+
+    # 깊은 단계(6단계)와 들여쓰기 기반 해석: 모든 항목이 빠짐없이 가지로 들어가야 한다
+    deep = ("● 잡음 줄은 무시\n📌 대전 · 9월 4주차 활동 보고\n  ▸ 1. 캠페인\n    · 콘텐츠 경로 : https://a.b/c?x=1&y=2\n"
+            "    · 세부\n      - 3회 참여 : 8개소\n        - 도안 경로당\n          - 이득주 짬짬반장\n            - 메모\n"
+            "  ▸ 2. 실적\n\n💡 피드백\n이건 제외")
+    nodes = parse_report_tree(deep)
+    assert [d for d, _ in nodes] == [0, 1, 2, 2, 3, 4, 5, 6, 1], nodes
+    assert texts_of(build_emm_from_nodes(nodes, "무시")) == [t.replace("&", "&amp;") for _, t in nodes]
+    # 깊이가 한꺼번에 튀어도(2 → 5) 가지가 끊겨 사라지지 않고 한 단계씩만 깊어진다
+    jumpy = parse_report_tree("📌 중심\n  ▸ 가\n          - 튄 항목\n  ▸ 나")
+    assert [d for d, _ in jumpy] == [0, 1, 2, 1] and len(texts_of(build_emm_from_nodes(jumpy, "x"))) == 4
+    # 예전 형식(들여쓰기 없는 ▸/·)도 그대로 읽힌다
+    assert [d for d, _ in parse_report_tree("📌 중심\n▸ 가\n· 나")] == [0, 1, 2]
+    # 여러 SO 취합: 공통 중심토픽 아래 SO마다 1단계 가지, 제어문자는 제거
+    a, b = parse_report_tree("📌 대전 · 9월 4주차\n  ▸ 실적\n    · 14회\x0b"), parse_report_tree("📌 광주 · 9월 4주차\n  ▸ 실적")
+    merged = texts_of(build_emm_from_nodes(merge_report_trees([a, b]), "9월 4주차 SO별 활동 보고 취합"))
+    assert merged == ["9월 4주차 SO별 활동 보고 취합", "대전 · 9월 4주차", "실적", "14회", "광주 · 9월 4주차", "실적"], merged
     print("emm_export self-check OK")
