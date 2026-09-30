@@ -11,7 +11,8 @@
 # ============================================================
 import re
 
-from ai_engine.gemini_api import generate_report_reply, generate_pivot_insight_reply, is_api_error
+from ai_engine.gemini_api import generate_report_reply, generate_pivot_insight_reply, is_api_error, read_file_text
+from utils.file_reader import read_attachment, AttachmentError
 from config import SO_REGIONS, REGION_ORDER as _REGION_ORDER
 from database.db_manager import summarize_profile_context
 from services.analysis_service import run_pivot_analysis, insight_spec_str, insight_rows_str, data_period_str
@@ -22,10 +23,16 @@ _LONG_PASTE_CHARS = 200          # 이 길이 이상 붙여넣은 글은 "정리
 _URL = re.compile(r"https?://[^\s)\]>\"'）]+")
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _MAX_MISSING_SHOWN = 12
+_CONTENT_CHANGE = re.compile(r"빼|삭제|제외|없애|지워|줄여|요약|위주|만 |만$|말고|새로|처음부터")  # 내용을 줄이거나 바꾸라는 요청이면 이전 안과 대조하지 않는다
+
+
+def _tree_part(text):
+    """취합안 답변에서 트리 부분만(뒤에 붙는 '구성 메모' 문단은 AI가 쓴 설명이라 대조에서 뺀다)."""
+    return text.split("\n구성 메모")[0]
 
 
 _WORD = re.compile(r"[가-힣A-Za-z0-9]{2,}")
-_INSTRUCTION_LINE = re.compile(r"정리해|붙여넣|보고서(?:야|예요|에요|입니다|이야)")  # 원문이 아니라 실무자가 덧붙인 요청 줄
+_INSTRUCTION_LINE = re.compile(r"정리해|붙여넣|보고서(?:야|예요|에요|입니다|이야)|^\s*\[첨부 파일:")  # 원문이 아니라 실무자가 덧붙인 요청 줄
 _MAX_LINE_SHOWN = 40
 
 
@@ -76,6 +83,17 @@ def _ask_again(history_with_user, first_reply, correction, so_reports_str=""):
     )
 
 
+def read_attachments(files):
+    """올린 파일 [(이름, 바이트)]를 읽는다. 반환: ([{'제목', '본문'}], [읽지 못한 파일의 사유])."""
+    ok, failed = [], []
+    for name, data in files:
+        try:
+            ok.append(read_attachment(name, data, ocr=read_file_text))
+        except AttachmentError as e:
+            failed.append(str(e))
+    return ok, failed
+
+
 def build_material(question, turn, max_rows=60):
     """분석 탭 답변(turn)을 보고서 재료로 만든다: 질문 + 답변 글 + 결과표(앞 max_rows행). 숫자는 분석에서 계산된 그대로다."""
     rows = turn.get('table') or []
@@ -97,8 +115,10 @@ def collect_materials(messages, excluded=()):
 def so_reports_context(reports, materials=()):
     """AI에게 재료로 주는 SO별 정리본 전문과 분석 자료(제외된 것은 이미 빠진 목록을 받는다)."""
     text = "\n\n".join(f"[{r['SO']} · {r['기간'] or '기간 미확인'}]\n{r['text']}" for r in reports)
-    if materials:
-        text += "\n\n[분석 자료 - 분석 탭에서 시청 데이터를 직접 계산한 결과]\n" + "\n\n".join(f"<{m['제목']}>\n{m['본문']}" for m in materials)
+    for kind, header in (("분석", "[분석 자료 - 분석 탭에서 시청 데이터를 직접 계산한 결과]"), ("첨부", "[첨부 자료 - 실무자가 올린 파일에서 읽은 내용]")):
+        group = [m for m in materials if m.get('종류', '분석') == kind]
+        if group:
+            text += f"\n\n{header}\n" + "\n\n".join(f"<{m['제목']}>\n{m['본문']}" for m in group)
     return text
 
 
@@ -117,11 +137,16 @@ def _reply_type(info, reply_text, user_text):
     return kind
 
 
-def process_report_turn(messages, user_text, profile_df, db_audience=None, db_content=None, excluded_so=(), excluded_materials=()):
+def process_report_turn(messages, user_text, profile_df, db_audience=None, db_content=None, excluded_so=(), excluded_materials=(),
+                        attachments=(), display_text=None):
     """반환: (new_messages, chart_spec). chart_spec은 데이터 요청이 없었거나 계산 결과가 비었으면 None.
-    excluded_so / excluded_materials: 취합에서 뺀 SO 이름들 / 분석 자료의 메시지 번호 - AI 재료에서도 뺀다."""
-    user_turn = {"role": "user", "text": user_text}
-    history_with_user = _compact_history(messages) + [user_turn]
+    excluded_so / excluded_materials: 취합에서 뺀 SO 이름들 / 분석 자료의 메시지 번호 - AI 재료에서도 뺀다.
+    attachments: 이번에 올린 파일들 [{'제목', '본문'}](utils/file_reader) - AI에게는 붙여넣은 글처럼 "[첨부 파일: 이름]" 블록으로 전달한다.
+    display_text: 화면·저장용 사용자 말풍선 글(첨부 본문을 그대로 저장하지 않으려고). 없으면 user_text."""
+    attachments = list(attachments)
+    ai_text = (user_text + "".join(f"\n\n[첨부 파일: {a['제목']}]\n{a['본문']}" for a in attachments)).strip()
+    user_turn = {"role": "user", "text": user_text if display_text is None else display_text}
+    history_with_user = _compact_history(messages) + [{"role": "user", "text": ai_text}]
     profile_context_str = f"{summarize_profile_context(profile_df)}\n{data_period_str(db_audience)}"
     reports = [r for r in collect_so_reports(messages) if r['SO'] not in set(excluded_so)]
     materials = collect_materials(messages, excluded_materials)
@@ -131,22 +156,26 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
     reply_text, parsed = parse_target_conditions(ai_raw)
     parsed = parsed or {}
     info = parsed.get('보고서정보')
-    kind = _reply_type(info, reply_text, user_text)
+    kind = _reply_type(info, reply_text, ai_text)
     checks = []
     missing = []
 
     # 🌟 대조 검사: 정리 = 원문의 링크·숫자·문장이 결과에 있는지(긴 원문을 붙여넣었고 트리가 나왔을 때),
     # 취합안 = 결과의 링크·숫자가 SO별 보고서에 실제로 있는지(지어낸 값이 없는지). 문제가 있으면 한 번만 다시 시킨다.
     verify = None
-    if kind == '정리' and len(user_text) >= _LONG_PASTE_CHARS and parse_report_tree(reply_text):
-        verify = (lambda t: find_missing_items(user_text, t, lines=True),
+    if kind == '정리' and len(ai_text) >= _LONG_PASTE_CHARS and parse_report_tree(reply_text):
+        verify = (lambda t: find_missing_items(ai_text, t, lines=True),
                   "누락 의심 {n}건 → 다시 정리 요청: {items}",
                   "원문에 있는데 정리 결과에서 빠졌거나 바뀐 링크·숫자·문장이 있어: {items}. 원문 그대로 해당 항목에 넣어서 전체 트리를 처음부터 다시 정리해줘. 다른 내용은 바꾸지 마.")
     elif kind == '취합안' and parse_report_tree(reply_text):
-        source = "\n".join([r['text'] for r in reports] + [m['본문'] for m in materials])
-        verify = (lambda t: find_missing_items(t, source),
-                  "SO 보고서에 없는 값 {n}건 → 다시 작성 요청: {items}",
-                  "취합안에 SO별 보고서에 없는 링크·숫자가 있어: {items}. SO별 보고서에 있는 값만 그대로 써서 전체 취합안을 처음부터 다시 작성해줘.")
+        source = "\n".join([r['text'] for r in reports] + [m['본문'] for m in materials] + [a['본문'] for a in attachments])
+        # 결과의 링크·숫자는 SO 보고서(와 분석 자료)에 있어야 하고, 구성만 바꾸는 요청이면 이전 취합안의 링크·숫자도 그대로여야 한다
+        prev = latest_draft(messages)
+        prev_tree = _tree_part(prev['text']) if prev and not _CONTENT_CHANGE.search(user_text) else ""
+        verify = (lambda t: list(dict.fromkeys(find_missing_items(_tree_part(t), source) + (find_missing_items(prev_tree, _tree_part(t)) if prev_tree else []))),
+                  "취합안 대조 {n}건 → 다시 작성 요청: {items}",
+                  "취합안에 문제가 있어: {items}. 링크·숫자는 SO별 보고서(와 분석 자료)에 있는 값만 그대로 써. 구성만 바꾸는 요청이면 "
+                  "이전 취합안에 있던 링크·숫자는 빠뜨리지 마. 전체 취합안을 처음부터 다시 작성해줘.")
     if verify:
         check, note, fix = verify
         missing = check(reply_text)
@@ -190,7 +219,10 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
         new_message["checks"] = checks
     if chart_spec:
         new_message["chart"] = chart_spec
-    new_messages = messages + [user_turn, new_message]
+    # 정리(SO 보고서 자체)가 아니면 첨부 파일은 이후 대화에서도 쓸 수 있게 자료로 담아 둔다(답변보다 앞에 두어 이 답변이 낡은 취합안으로 보이지 않게)
+    notes = [] if kind == '정리' else [
+        {"role": "assistant", "text": f"첨부 자료를 담았어요: {a['제목']}", "material": {**a, "종류": "첨부"}} for a in attachments]
+    new_messages = messages + [user_turn] + notes + [new_message]
     return new_messages, chart_spec
 
 
@@ -361,7 +393,41 @@ if __name__ == "__main__":
     assert "[분석 자료" not in calls[0][1]
     assert draft_is_stale([{"role": "assistant", "text": "📌 취합", "draft": True}, note]) and not draft_is_stale([note, {"role": "assistant", "text": "📌 취합", "draft": True}])
     # AI가 유형을 "정리"로 잘못 밝혀도 짧은 요청에 SO 없이 나온 트리는 취합안이다(SO 미확인 보고서로 쌓이지 않게). 긴 원문이면 정리
-    mislabeled = '\n```json\n{"보고서정보": {"답변유형": "정리", "SO": "", "기간": ""}}\n```'
+    # 구성 변경: 메모 속 숫자는 대조하지 않고, 구성만 바꾸는 요청에서 이전 취합안의 숫자가 사라지면 다시 시키며, 빼 달라는 요청이면 허용한다
+    prev_draft = {"role": "assistant", "text": "📌 취합\n  ▸ 조회수\n    · 대전 : 14회 → 70회\n    · 광주 : 13개소", "draft": True}
+    base = prior + [prev_draft]
+    memo = "\n\n구성 메모: 조회수를 한 가지로 묶었고 3곳을 정리했어요."
+    same = "📌 취합\n  ▸ 광주\n    · 13개소\n  ▸ 대전\n    · 14회 → 70회"
+    calls.clear(); replies = iter([same + memo + tail])
+    m = process_report_turn(base, "SO 먼저 나누고 그 아래에 주요내용으로 뒤집어줘", None, None, None)[0][-1]
+    assert m.get('draft') and 'missing' not in m and 'checks' not in m and "구성 메모" in m['text'], m
+    lost = "📌 취합\n  ▸ 대전\n    · 14회 → 70회"
+    calls.clear(); replies = iter([lost + tail, same + tail])
+    m = process_report_turn(base, "SO 먼저 나누고 그 아래에 주요내용으로 뒤집어줘", None, None, None)[0][-1]
+    assert len(calls) == 2 and '13' in calls[1][0][-1]['text'] and 'missing' not in m and "13개소" in m['text'], m
+    calls.clear(); replies = iter([lost + tail])
+    m = process_report_turn(base, "광주는 빼줘", None, None, None)[0][-1]
+    assert len(calls) == 1 and 'missing' not in m
+
+    # 올린 파일 읽기: 읽은 것과 못 읽은 사유를 나눠 돌려준다(사진은 AI가 글자를 읽는다)
+    globals()['read_file_text'] = lambda data, mime: "사진 속 글자 70회"
+    ok_files, bad_files = read_attachments([("a.txt", "안녕".encode()), ("b.png", b"x"), ("c.exe", b"x")])
+    assert [a["제목"] for a in ok_files] == ["a.txt", "b.png"] and ok_files[1]["본문"] == "사진 속 글자 70회" and len(bad_files) == 1 and "c.exe" in bad_files[0]
+
+    # 첨부 파일: AI에는 붙여넣은 글처럼 전달하고 화면/저장에는 짧은 글만, 정리가 아니면 자료로 담아 두며 취합안 대조에도 쓴다
+    att = [{"제목": "표.xlsx", "본문": "SO | 시청자\n대전 | 4321\n광주 | 987"}]
+    calls.clear(); replies = iter(["📌 취합\n  ▸ 첨부 표\n    · 대전 4321" + tail])
+    out = process_report_turn(prior, "이 표도 넣어서 취합안 만들어줘", None, None, None, attachments=att, display_text="이 표도 넣어서 취합안 만들어줘\n[첨부] 표.xlsx")[0]
+    assert "[첨부 파일: 표.xlsx]" in calls[0][0][-1]['text'] and "4321" in calls[0][0][-1]['text']
+    assert out[-3]['text'].endswith("[첨부] 표.xlsx") and out[-2]['material']['종류'] == "첨부" and out[-1].get('draft') and 'missing' not in out[-1], out
+    assert "[첨부 자료" in so_reports_context([], collect_materials(out)) and "[분석 자료" not in so_reports_context([], collect_materials(out))
+    assert not draft_is_stale(out)
+    src_att = [{"제목": "대전.txt", "본문": "1. 캠페인 진행\n총 13개소 경로당 참여, 사진 125건 https://a.b/c"}]
+    calls.clear(); replies = iter([good + '\n```json\n{"보고서정보": {"답변유형": "정리", "SO": "대전"}}\n```'] * 2)
+    out = process_report_turn([], "대전 보고서야", None, None, None, attachments=src_att * 8)[0]  # 원문(첨부)이 길면 대조 검사를 한다
+    assert out[-1].get('report_meta') and all(m.get('material') is None for m in out), out
+
+    mislabeled ='\n```json\n{"보고서정보": {"답변유형": "정리", "SO": "", "기간": ""}}\n```'
     calls.clear(); replies = iter([ok2 + mislabeled])
     m = process_report_turn(with_mat, "취합안 만들어줘", None, None, None)[0][-1]
     assert m.get('draft') and 'report_meta' not in m, m

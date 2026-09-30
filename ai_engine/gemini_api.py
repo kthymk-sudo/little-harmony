@@ -92,18 +92,19 @@ def _discover_target_model():
     return target_model
 
 
-def _switch_model(target_model, prompt, temperature):
+def _switch_model(target_model, prompt, temperature, files=None):
     """이 모델을 소진으로 표시하고 다른 모델로 다시 호출한다(한도 초과·서버 과부하·무응답 공통). 바꿀 모델이 없으면 None."""
     _mark_exhausted(target_model)
     _discover_target_model.clear()
     new_target_model = _discover_target_model()
     if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
-        return _call_gemini_api(prompt, temperature)
+        return _call_gemini_api(prompt, temperature, files)
     return None
 
 
-def _call_gemini_api(prompt, temperature=0.55):
-    """Google Gemini API 호출, 예외 처리, Timeout, 재시도를 모두 담당하는 코어 함수."""
+def _call_gemini_api(prompt, temperature=0.55, files=None):
+    """Google Gemini API 호출, 예외 처리, Timeout, 재시도를 모두 담당하는 코어 함수.
+    files: 함께 보낼 파일 [(mime_type, base64 문자열)] - 사진·PDF를 읽힐 때 쓴다."""
     if GEMINI_API_KEY == "여기에_발급받으신_GEMINI_API_KEY를_붙여넣으세요" or not GEMINI_API_KEY:
         return "⚠️ 시스템 은닉형 API 키가 설정되지 않았습니다. .env 또는 config 설정을 확인하세요."
 
@@ -112,7 +113,8 @@ def _call_gemini_api(prompt, temperature=0.55):
 
     try:
         target_model = _discover_target_model()
-        payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": temperature}}
+        parts = [{"text": prompt}] + [{"inline_data": {"mime_type": mime, "data": data}} for mime, data in (files or [])]
+        payload = {"contents": [{"parts": parts}], "generationConfig": {"temperature": temperature}}
 
         # 🌟 [속도 최적화] 구글 서버가 아플 때 너무 오래 기다리지 않도록 재시도는 총 2번, 타임아웃은 20초.
         for attempt in range(2):
@@ -136,7 +138,7 @@ def _call_gemini_api(prompt, temperature=0.55):
                             wait_s = (2 ** attempt) + 1
                         time.sleep(min(wait_s, 20))
                         continue
-                    switched = _switch_model(target_model, prompt, temperature)
+                    switched = _switch_model(target_model, prompt, temperature, files)
                     return switched if switched is not None else (
                         "⚠️ [모든 AI 모델 한도 초과] 현재 사용 가능한 모든 AI 모델의 일일 한도를 모두 소진했습니다. "
                         "내일 다시 시도하시거나, Google AI Studio에서 결제 설정을 확인해주세요."
@@ -147,7 +149,7 @@ def _call_gemini_api(prompt, temperature=0.55):
                         time.sleep(2)
                         continue
                     # 🌟 [503 서버 과부하 우회] 구글 서버가 뻗었을 때도 즉시 다른 모델로 갈아탑니다.
-                    switched = _switch_model(target_model, prompt, temperature)
+                    switched = _switch_model(target_model, prompt, temperature, files)
                     return switched if switched is not None else (
                         f"⚠️ [서버 과부하] 구글 AI 서버가 혼잡하여 다른 모델로 우회하려 했으나 모두 실패했습니다. (상태코드: {res_gen.status_code})"
                     )
@@ -167,7 +169,7 @@ def _call_gemini_api(prompt, temperature=0.55):
                     time.sleep(2)
                     continue
                 # 🌟 [타임아웃 무응답 우회] 응답이 너무 오래 걸려도 버리고 다른 모델로 갈아탑니다.
-                switched = _switch_model(target_model, prompt, temperature)
+                switched = _switch_model(target_model, prompt, temperature, files)
                 return switched if switched is not None else f"⚠️ 네트워크 통신 오류(Timeout 등)가 지속되어 중지합니다: {str(req_e)}"
 
     except Exception as e:
@@ -222,6 +224,14 @@ def generate_pivot_insight_reply(question_str, spec_str, result_str):
 def generate_code_analyst_step(prompt):
     """📊 분석 탭 코드 실행형: 한 단계(코드 또는 최종 답변). 프롬프트는 services/code_analyst.py가 조립한다."""
     return _call_gemini_api(prompt, temperature=0.2)
+
+def read_file_text(data, mime_type):
+    """🌟 [보고서 첨부] 사진·PDF 속 글자와 표를 그대로 옮겨 적은 텍스트를 돌려준다(요약·해석 없이). 실패하면 ⚠️ 문구."""
+    import base64
+    prompt = ("첨부된 파일에 보이는 글자와 표를 빠짐없이 그대로 옮겨 적어줘. 요약·해석·추측·평가는 하지 말고, 읽을 수 없는 글자는 (판독불가)로 표시해. "
+              "표는 한 행을 한 줄에 '값 | 값 | 값' 형태로 옮기고, 목록과 들여쓰기 구조는 유지해. "
+              "글자가 거의 없는 사진이면 보이는 것을 사실만 짧게 설명해. 인사말이나 설명 없이 옮긴 내용만 출력해.")
+    return _call_gemini_api(prompt, temperature=0.1, files=[(mime_type, base64.b64encode(data).decode("ascii"))])
 
 def generate_report_reply(chat_history, profile_context_str, so_reports_str=""):
     chat_history_str = _format_chat_history(chat_history)
