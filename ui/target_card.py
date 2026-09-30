@@ -7,6 +7,7 @@
 import io
 import streamlit as st
 from ai_engine.gemini_api import generate_target_reasoning, is_api_error
+from services.copy_service import is_over_limit, SHORTEN_REQUEST
 from database.db_manager import (
     apply_target_conditions, format_target_summary, format_conditions_line,
     save_conversation, make_conversation_title,
@@ -105,6 +106,12 @@ def render_target_card():
 
         if st.session_state.phase == 'copywriting':
             st.caption("아래 채팅창에 원하는 방향을 입력하면 방금 만든 카피를 다시 다듬어드립니다. (예:이벤트, 친근한 느낌)")
+            # 🌟 [글자수 맞춰 다시 쓰기] 제한을 넘은 버전이 있으면 버튼 한 번으로 줄여서 다시 쓰게 한다
+            if is_over_limit(st.session_state.get('push_copy_result'), st.session_state.get('last_copy_type', 'push')):
+                if st.button("✂️ 글자수 맞춰 다시 쓰기", width='stretch', key="btn_shorten_copy"):
+                    st.session_state.messages.append({"role": "user", "text": SHORTEN_REQUEST})
+                    st.session_state.pending_user_text = SHORTEN_REQUEST
+                    st.rerun()
             if st.button("🎯 타겟 조건 다시 설정하기", width='stretch'):
                 st.session_state.phase = 'targeting'
                 st.session_state.messages.append({
@@ -123,12 +130,25 @@ def render_confirm_bar(profile_df, db_audience):
     호출하고, 아직 한 번도 확정한 적 없을 때만 메시지 목록 맨 끝에서 호출한다
     (ui/chat_app.py 참고). 조건을 더 이야기해서 바꾼 뒤 다시 눌러 재확정하는 것도
     이 함수 하나로 그대로 지원된다."""
-    st.info(f"🔖 현재까지 파악된 조건: {format_conditions_line(st.session_state.target_conditions)}")
+    conditions = st.session_state.target_conditions
+    st.info(f"🔖 현재까지 파악된 조건: {format_conditions_line(conditions)}")
+    # 🌟 [예상 인원 미리 보기] 확정을 누르기 전에도 지금 조건에 몇 명이 해당하는지 바로 보여준다
+    try:
+        _, preview_stats = apply_target_conditions(profile_df, conditions, db_audience)
+        n, total = preview_stats.get('대상자수', 0), preview_stats.get('전체시청자수', 0)
+        share = f" (전체 {total:,}명의 {n / total * 100:.1f}%)" if total else ""
+        if n == 0:
+            st.warning(f"👥 지금 조건에 해당하는 분이 **0명**이에요. 조건을 조금 넓혀볼까요?{share}")
+        else:
+            st.caption(f"👥 지금 조건의 예상 인원: **{n:,}명**{share}")
+    except Exception:  # 미리 보기는 참고용이라 실패해도 확정 흐름은 그대로
+        pass
     if st.button("✅ 이 조건으로 타겟 확정하기", type="primary"):
         with st.spinner("타겟을 계산하고 근거를 정리하는 중..."):
             target_df, stats = apply_target_conditions(profile_df, st.session_state.target_conditions, db_audience)
             summary_str = format_target_summary(st.session_state.target_conditions, stats)
-            reasoning = generate_target_reasoning(str(st.session_state.target_conditions), str(stats))
+            visible = {k: v for k, v in st.session_state.target_conditions.items() if not k.startswith('__')}
+            reasoning = generate_target_reasoning(str(visible), str(stats))  # '__' 키(가져온 고객번호 목록)는 AI에 안 보낸다
 
         # 🌟 [에러 오염 방지] 대상자 수 계산(target_df/stats)은 AI 호출과 무관하게 항상
         # 성공하므로, 근거(reasoning) 생성이 실패했더라도 결과 카드(엑셀 다운로드 포함)는

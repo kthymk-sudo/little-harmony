@@ -29,6 +29,15 @@ def length_report(copy_text, copy_type='push'):
     return "\n".join(lines)
 
 
+SHORTEN_REQUEST = "글자수 제한을 넘은 버전이 있어. 제목과 본문 모두 제한 안으로 줄여서 세 버전을 다시 써줘."
+
+
+def is_over_limit(copy_text, copy_type='push'):
+    """카피의 어느 한 버전이라도 제목/본문 글자수 제한을 넘었는지(버튼 표시 판단용)."""
+    title_max, body_max = _LIMITS.get(copy_type, _LIMITS['push'])
+    return any(len(t.strip()) > title_max or len(b.strip()) > body_max for _, t, b in _VERSION.findall(copy_text or ""))
+
+
 def process_copy_turn(messages, target_summary_str, reasoning, user_text, copy_type='push'):
     """카피 작성 대화 한 턴 처리 (Streamlit 비의존 - 단위 테스트 가능).
     copy_type: 'push'(앱푸시) 또는 'sms'(문자) - 어떤 형식/글자수 제약으로 만들지 결정.
@@ -55,4 +64,5 @@ if __name__ == "__main__":
     globals()['generate_ai_push_copy'] = lambda *a, **k: sample
     msgs, copy = process_copy_turn([], "요약", "근거", "더 짧게")
     assert copy == sample.strip() and msgs[-1]['text'].startswith("[📱 앱푸시 카피]") and '**' not in msgs[-1]['text']
+    assert is_over_limit(sample, 'push') and not is_over_limit(sample.split("[버전 2")[0], 'push') and not is_over_limit("", 'push')
     print("copy_service self-check OK")

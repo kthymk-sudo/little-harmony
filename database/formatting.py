@@ -18,6 +18,25 @@ _CONDITION_LABEL_MAP = {
 }
 
 
+_WITHIN_LABELS = {'장르포함': '장르', '채널명포함': '채널', '메뉴명포함': '메뉴', '콘텐츠명포함': '콘텐츠', '시리즈명포함': '시리즈'}
+
+
+def _format_within_part(within):
+    """🌟 [기간 안에 한 행동] {"기간":..., "장르포함": [...]} -> "기간 내 시청(2026-08 · 장르 트로트)" """
+    if not isinstance(within, dict) or not within:
+        return None
+    period = within.get('기간')
+    if isinstance(period, dict):
+        start, end = period.get('시작') or '', period.get('종료') or ''
+        period = f"{start}~{end}" if (start or end) else None
+    what = [f"{label} {','.join(map(str, v if isinstance(v, list) else [v]))}"
+            for key, label in _WITHIN_LABELS.items() if (v := within.get(key))]
+    if within.get('최소횟수'):
+        what.append(f"{within['최소횟수']}회 이상")
+    inner = " · ".join(([str(period)] if period else []) + what)
+    return f"기간 내 시청({inner})" if inner else None
+
+
 def _format_condition_parts(conditions):
     parts = []
     for key, label in _CONDITION_LABEL_MAP.items():
@@ -27,6 +46,11 @@ def _format_condition_parts(conditions):
                 parts.append(f"{label}={','.join(map(str, val))}")
             else:
                 parts.append(f"{label}={val}")
+    within_part = _format_within_part((conditions or {}).get('기간내시청'))
+    if within_part:
+        parts.append(within_part)
+    if (conditions or {}).get('분석출처'):
+        parts.append(f"분석에서 가져온 집단({conditions['분석출처']})")
     return parts
 
 

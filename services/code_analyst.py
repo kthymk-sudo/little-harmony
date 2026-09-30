@@ -8,22 +8,19 @@
 #   AI가 pandas 코드 작성 → 시스템이 실제 데이터(복사본)로 실행 → 결과를 AI에게 보여줌
 # AI가 충분하다고 판단하면 최종 답변(+ 그래프용 결과표 지정)을 쓴다. 숫자는 실행 결과에서만 나온다.
 #
-# 안전장치: 코드는 import/파일·네트워크 접근/while/밑줄(_)로 시작하는 속성 접근이 막힌 채로,
-# 허용된 내장함수와 pd/np, 데이터 복사본만 있는 환경에서 실행된다. 결과를 AI에게 보낼 때는
-# 고객번호 컬럼을 가린다. 원본 DB는 건드릴 수 없다.
+# 안전장치(services/code_sandbox.py): 코드는 import/파일·네트워크 접근/while/모듈 타고 들어가기가 막힌 채로,
+# 허용된 함수만 담은 pd/np와 데이터 복사본만 있는 환경에서, 앱과 분리된 별도 프로세스(시간·메모리 제한)로 실행된다.
+# 결과를 AI에게 보낼 때는 고객번호 컬럼을 가린다. 원본 DB는 건드릴 수 없다.
 # ============================================================
-import ast
-import builtins
-import io
 import re
-import threading
-import types
 
 import numpy as np
 import pandas as pd
 
 from ai_engine.gemini_api import generate_code_analyst_step, is_api_error
 from prompts.code_analyst_prompt import get_code_analyst_prompt, FEEDBACK_INSTRUCTION
+from services import code_sandbox as sandbox
+from services.code_sandbox import check_code, SandboxSession, SandboxUnavailable
 from services.analysis_service import (
     _add_derived_columns, _with_content_attrs, _REGION_ORDER, _REGION_COLUMNS, _region_sort_key,
     CHART_TYPES, normalize_pivot_result,
@@ -43,6 +40,7 @@ _HISTORY_TURNS = 8
 _PRIVATE_COLS = ['이웃고객명', '게시자 아이디', '순번']   # AI가 볼 필요 없는 개인정보/내부 컬럼
 _HIDDEN_IN_PREVIEW = ['R고객번호']                       # 결과를 AI에게 보낼 때 가리는 컬럼
 FEEDBACK_REQUEST_TEXT = "🔍 이 결과를 전체와 비교해서 피드백해줘"
+ISOLATED = True           # 분석 코드를 별도 프로세스에서 실행(시간·메모리 제한). 테스트/문제 확인 때만 False
 
 # ------------------------------------------------------------
 # 데이터 준비
@@ -81,111 +79,11 @@ def describe_tables(tables):
 
 
 # ------------------------------------------------------------
-# 안전 실행
+# 안전 실행 - 코드 검사/제한된 환경/별도 프로세스 격리는 services/code_sandbox.py
 # ------------------------------------------------------------
-_BLOCKED_NAMES = {
-    'eval', 'exec', 'open', 'compile', '__import__', 'globals', 'locals', 'getattr', 'setattr', 'delattr',
-    'vars', 'input', 'breakpoint', 'exit', 'quit', 'help', 'dir', 'memoryview', 'type', 'object', 'super',
-}
-_BLOCKED_ATTR = re.compile(
-    r'^(_.*|to_(csv|excel|sql|pickle|parquet|hdf|feather|stata|clipboard|html|latex|markdown|json|xml|orc|string)'
-    r'|read_\w+|eval|query|system|popen|load|save|savetxt|tofile|fromfile|loadtxt|genfromtxt|savefig|style|plot|dumps?'
-    r'|os|sys|io|subprocess|shutil|pathlib|builtins|importlib|ctypes|compat|core|util|lib|api|common|testing)$'
-)
-_BLOCKED_NODES = (ast.Import, ast.ImportFrom, ast.While, ast.Global, ast.Nonlocal, ast.With, ast.AsyncWith,
-                  ast.AsyncFunctionDef, ast.ClassDef, ast.Try, ast.Raise)
-_MAX_RANGE = 1_000_000
-
-
-def _capped_range(*args):
-    r = range(*args)
-    if len(r) > _MAX_RANGE:
-        raise ValueError(f"range가 너무 커요({len(r):,}). 반복문 대신 pandas 집계로 계산해 주세요.")
-    return r
-
-
-_SAFE_BUILTINS = {n: getattr(builtins, n) for n in (
-    'len', 'min', 'max', 'sum', 'sorted', 'round', 'abs', 'list', 'dict', 'set', 'tuple', 'str', 'int',
-    'float', 'bool', 'enumerate', 'zip', 'isinstance', 'any', 'all', 'map', 'filter', 'reversed', 'divmod',
-)}
-_SAFE_BUILTINS['range'] = _capped_range
-
-# 🌟 [격리] pd/np 모듈을 그대로 주면 pd.io.common.os처럼 모듈 속성을 타고 os(파일 삭제 등)에 닿을 수
-# 있었다. 분석에 필요한 함수만 담은 대리 객체를 준다 - 별칭(p = pd)을 써도 없는 속성은 없다.
-_PD_ALLOWED = (
-    'DataFrame', 'Series', 'Index', 'MultiIndex', 'Categorical', 'CategoricalDtype', 'Timestamp', 'Timedelta',
-    'Period', 'NaT', 'NA', 'to_datetime', 'to_numeric', 'to_timedelta', 'date_range', 'period_range', 'merge',
-    'merge_asof', 'concat', 'cut', 'qcut', 'pivot_table', 'crosstab', 'melt', 'get_dummies', 'isna', 'isnull',
-    'notna', 'notnull', 'unique', 'factorize', 'Grouper', 'IndexSlice', 'DateOffset',
-)
-_NP_ALLOWED = (
-    'nan', 'inf', 'where', 'select', 'round', 'mean', 'median', 'sum', 'std', 'var', 'min', 'max', 'abs', 'sqrt',
-    'log', 'log1p', 'exp', 'percentile', 'quantile', 'clip', 'arange', 'linspace', 'array', 'isnan', 'isfinite',
-    'maximum', 'minimum', 'cumsum', 'diff', 'sort', 'argsort', 'unique', 'floor', 'ceil', 'int64', 'float64',
-    'divide', 'nanmean', 'nansum', 'nanmedian', 'count_nonzero', 'histogram', 'corrcoef', 'average', 'sign',
-    'zeros', 'ones', 'full', 'concatenate', 'repeat', 'tile', 'logical_and', 'logical_or', 'logical_not', 'isin',
-)
-_SAFE_PD = types.SimpleNamespace(**{n: getattr(pd, n) for n in _PD_ALLOWED})
-_SAFE_NP = types.SimpleNamespace(**{n: getattr(np, n) for n in _NP_ALLOWED})
-
-
-def check_code(code):
-    """실행 전 검사. 문제가 있으면 이유 문자열, 없으면 None."""
-    try:
-        tree = ast.parse(code)
-    except SyntaxError as e:
-        return f"문법 오류: {e}"
-    for node in ast.walk(tree):
-        if isinstance(node, _BLOCKED_NODES):
-            return f"허용되지 않는 구문: {type(node).__name__}"
-        if isinstance(node, ast.Name) and (node.id in _BLOCKED_NAMES or node.id.startswith('__')):
-            return f"허용되지 않는 이름: {node.id}"
-        if isinstance(node, ast.Attribute) and _BLOCKED_ATTR.match(node.attr):
-            return f"허용되지 않는 속성: {node.attr}"
-    return None
-
-
-_PRELOADED_IMPORT = re.compile(r'^\s*import\s+(pandas|numpy)(\s+as\s+\w+)?\s*$', re.MULTILINE)
-
-
 def run_code(code, tables, previous):
-    """코드를 데이터 복사본으로 실행. 반환: {'value': 결과, 'printed': 출력} 또는 {'error': ..., 'printed': ...}"""
-    code = _PRELOADED_IMPORT.sub('', code)  # pd/np는 이미 준비돼 있으니 그 import 줄만 지운다(다른 import는 막힘)
-    problem = check_code(code)
-    if problem:
-        return {'error': problem, 'printed': ''}
-    out = io.StringIO()
-
-    def _print(*args, sep=' ', end='\n', **_):
-        out.write(sep.join(str(a) for a in args) + end)
-
-    namespace = {
-        '__builtins__': {**_SAFE_BUILTINS, 'print': _print},
-        'pd': _SAFE_PD, 'np': _SAFE_NP, 'SO권역순서': list(_REGION_ORDER), '이전결과': dict(previous),
-        **{name: df.copy() for name, df in tables.items()},
-    }
-    outcome = {}
-
-    def _target():
-        try:
-            exec(compile(code, '<분석코드>', 'exec'), namespace)
-            # AI가 자주 영어 이름(result)에 담는다 - 같은 뜻으로 받아준다
-            outcome['value'] = namespace['결과'] if namespace.get('결과') is not None else namespace.get('result')
-        except Exception as e:  # AI 코드의 어떤 오류든 AI에게 돌려줘서 고치게 한다
-            outcome['error'] = f"{type(e).__name__}: {e}"
-
-    # ponytail: 스레드 타임아웃은 응답만 끊고 실행 자체는 멈추지 못함 - 긴 연산이 문제되면 별도 프로세스로
-    worker = threading.Thread(target=_target, daemon=True)
-    worker.start()
-    worker.join(_TIMEOUT_SEC)
-    printed = out.getvalue()[-3000:]
-    if worker.is_alive():
-        return {'error': f"{_TIMEOUT_SEC}초 안에 끝나지 않았어요. 더 가벼운 방법으로 계산해 주세요.", 'printed': printed}
-    if 'error' in outcome:
-        return {'error': outcome['error'], 'printed': printed}
-    if outcome.get('value') is None:
-        return {'error': "`결과` 변수에 값이 없어요. 보여줄 결과를 `결과 = ...`로 담아 주세요.", 'printed': printed}
-    return {'value': outcome['value'], 'printed': printed}
+    """같은 프로세스에서 실행(격리 프로세스를 못 쓸 때의 대체 경로이자 테스트용)."""
+    return sandbox.execute(code, tables, previous, list(_REGION_ORDER), _TIMEOUT_SEC)
 
 
 # 답변 속 숫자는 천 단위 쉼표(1,514)를 허용하고, 실행 결과(CSV·pandas 출력)는 쉼표가 구분자라 숫자만 읽는다
@@ -340,9 +238,24 @@ def _steps_str(steps):
     return "\n\n".join(parts)
 
 
+# 🌟 [버그 수정] "결과: 대전이 890명…"처럼 정상 답변에도 쓰는 "결과:" 줄까지 가짜로 몰던 것을 좁혔다.
+# 시스템 실행 기록의 표식과 "[2단계]" 머리말, 그리고 뒤에 내용 없이 "코드:"/"출력:"/"결과:"만 적은 줄
+# (실행 결과 표가 이어질 자리)만 가짜 실행 결과의 흔적으로 본다. 숫자를 지어낸 경우는 숫자 대조가 따로 막는다.
 _FABRICATION_SIGNS = re.compile(
-    rf"{_LOG_MARK}|\[\d+\s*단계\]|(^|\n)\s*(코드|출력|결과|실행한 코드|print 출력|실행 오류)\s*:", re.MULTILINE
+    rf"{_LOG_MARK}|\[\d+\s*단계\]|^\s*(코드|출력|결과|실행한 코드|print 출력|실행 오류)\s*:\s*$", re.MULTILINE
 )
+
+# 🌟 [버그 수정] "피드백 많은 콘텐츠 알려줘"처럼 "피드백"이라는 단어만 있어도 미시/거시 피드백으로 답하던 것을,
+# 전체와 비교한 피드백을 요청하는 표현일 때만 그렇게 하도록 좁혔다(버튼은 따로 확실히 지정).
+_FEEDBACK_REQUEST = re.compile(
+    r"(전체.{0,6}비교|비교.{0,6}전체).{0,12}(피드백|평가|시사점)"
+    r"|(피드백|평가|시사점).{0,6}(줘|해\s*줘|남겨|부탁|주세요|달라)"
+    r"|미시.{0,6}거시|거시.{0,6}미시"
+)
+
+
+def is_feedback_request(text):
+    return bool(_FEEDBACK_REQUEST.search(text or ""))
 
 
 def _invalid_reason(raw, has_code):
@@ -359,12 +272,62 @@ def _last_data_message(messages):
     return next((m for m in reversed(messages) if m.get('role') == 'assistant' and m.get('data')), None)
 
 
+_UNVERIFIED_TAIL = re.compile(r"\n\n⚠️ 이 답변의 숫자 중 .*?대조해서 봐주세요\.", re.DOTALL)
+
+
+def _evidence_text(messages, steps, user_text):
+    """🌟 [버그 수정] 답변 속 숫자를 대조할 근거. 예전에는 이전 답변의 글 전체를 근거로 삼아서, 이전 답변에서
+    "확인 안 됨"으로 표시된 숫자가 다음 질문에서는 근거로 통과했다. 이제는 이전 답변이 실제로 계산한 결과
+    (실행 기록)만 근거로 쓰고, 실행 기록이 없는 메시지(인사·오류 등)는 글에서 확인 안 됨 표시를 뺀 채로 쓴다."""
+    parts = [s.get('preview', '') + "\n" + s.get('printed', '') for s in steps]
+    for m in messages:
+        if m.get('steps'):
+            parts += [s.get('preview', '') + "\n" + s.get('printed', '') for s in m['steps']]
+        elif m.get('role') == 'user' or not m.get('unverified'):
+            parts.append(_UNVERIFIED_TAIL.sub('', m.get('text', '')))
+    parts.append(user_text)
+    return "\n".join(parts)
+
+
+class _StepRunner:
+    """코드 한 단계를 실행한다. 기본은 별도 프로세스(시간·메모리 제한, 시간 초과 시 실제로 종료).
+    프로세스를 시작하지 못하는 환경이면 같은 프로세스 실행으로 대신하고 그 사실을 남긴다."""
+
+    def __init__(self, tables):
+        self.tables, self.session, self.isolated, self.fallback_note = tables, None, ISOLATED, None
+
+    def run(self, code, step_number, values):
+        if self.isolated:
+            try:
+                if self.session is None:
+                    self.session = SandboxSession(self.tables, _REGION_ORDER, timeout=_TIMEOUT_SEC)
+                return self.session.run(code, step_number)
+            except SandboxUnavailable as e:
+                self.isolated = False
+                self.fallback_note = f"격리 실행을 시작하지 못해 같은 프로세스에서 실행했어요 ({e})"
+        return run_code(code, self.tables, values)
+
+    def close(self):
+        if self.session is not None:
+            self.session.close()
+
+
 def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False):
     """한 턴 처리. 반환: 새 assistant 메시지 dict
-       {'text', 'steps': [{'번호','설명','code','preview'|'error','printed'}], 'data'(그래프용, 선택), 'chart'(선택)}"""
+       {'text', 'steps': [{'번호','설명','code','preview'|'error','printed'}], 'data'(그래프용, 선택), 'chart'(선택),
+        'audience'(타겟팅으로 보낼 수 있는 집단, 선택)}"""
+    runner = _StepRunner(tables)
+    try:
+        return _run_turn(messages, user_text, tables, on_step, feedback, runner)
+    finally:
+        runner.close()
+
+
+def _run_turn(messages, user_text, tables, on_step, feedback, runner):
     schema = describe_tables(tables)
     history = _history_str(messages)
-    steps, values = [], {}
+    steps, values, audiences = [], {}, {}
+    valid_ids = set(tables['고객']['R고객번호'].astype(str)) if '고객' in tables else None
     correction, retries, nudges, verify_retries = "", 0, 0, 0
     checks = []  # 답변 검증 기록(지어낸 숫자 차단 등) - "계산 과정 보기"에 같이 보여준다
     unverified = []
@@ -384,8 +347,7 @@ def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False):
         unverified = []
         if not has_code and not reason:
             # 🌟 최종 답변의 숫자가 실제 실행 결과(또는 이전 답변)에 있는지 대조 - 지어낸 숫자 차단
-            evidence = "\n".join([s.get('preview', '') + "\n" + s.get('printed', '') for s in steps]
-                                 + [m.get('text', '') for m in messages] + [user_text])
+            evidence = _evidence_text(messages, steps, user_text)
             missing = ungrounded_numbers(parse_target_conditions(_CODE_BLOCK.sub('', raw))[0], evidence)
             if missing and verify_retries < _MAX_VERIFY_RETRIES:
                 verify_retries += 1
@@ -421,13 +383,22 @@ def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False):
             step = {'번호': len(steps) + 1, '설명': description, 'code': code}
             if on_step:
                 on_step(step['번호'], step['설명'])
-            run = run_code(step['code'], tables, values)
+            run = runner.run(step['code'], step['번호'], values)
+            if runner.fallback_note and runner.fallback_note not in checks:
+                checks.append(runner.fallback_note)
             step['printed'] = run.get('printed', '')
             if 'error' in run:
                 step['error'] = run['error']
             else:
                 values[step['번호']] = run['value']
                 step['preview'] = preview(run['value'])
+                ids = run.get('audience')
+                if ids:  # 🌟 코드가 `대상자`에 담은 집단 - 실제 시청자만 남긴다(타겟팅으로 보낼 수 있다)
+                    ids = [v for v in ids if valid_ids is None or v in valid_ids]
+                    if ids:
+                        audiences[step['번호']] = ids
+                        step['audience_count'] = len(ids)
+                        step['preview'] += f"\n[`대상자`: 고객 {len(ids):,}명이 지정됨]"
             steps.append(step)
             continue
         if reason:  # 다시 요청해도 지어낸 결과가 섞여 있으면 그 답변은 보여주지 않는다
@@ -435,19 +406,42 @@ def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False):
             return {'role': 'assistant', 'steps': steps, 'checks': checks,
                     'text': "계산은 했지만 답변을 믿을 수 있게 정리하지 못했어요. 아래 '계산 과정 보기'에서 실제 계산 "
                             "결과를 확인하시거나, 질문을 조금 나눠서 다시 물어봐주세요."}
-        message = {**_final_message(raw, steps, values, messages), 'checks': checks}
+        message = {**_final_message(raw, steps, values, messages, audiences), 'checks': checks}
         if unverified:
             message['text'] += (f"\n\n⚠️ 이 답변의 숫자 중 {', '.join(unverified[:6])}은(는) 실행 결과로 확인되지 않았어요. "
                                 f"'계산 과정 보기'의 실제 결과와 대조해서 봐주세요.")
+            message['unverified'] = list(unverified)
             checks.append(f"확인 안 된 숫자 표시: {', '.join(unverified[:6])}")
         return message
     return {'role': 'assistant', 'text': "분석을 마무리하지 못했어요. 질문을 조금 나눠서 다시 물어봐주세요.",
             'steps': steps, 'checks': checks}
 
 
-def _final_message(raw, steps, values, messages):
+_MAX_TABLE_ROWS, _MAX_TABLE_COLS = 2000, 30
+
+
+def _table_records(value):
+    """🌟 [표 다운로드] 답변의 핵심 결과표를 대화에 함께 저장할 수 있는 형태로(고객번호 컬럼 제외, 크기 제한). 표가 아니면 None."""
+    df = _as_frame(value)
+    if df is None or df.empty:
+        return None
+    df = df.drop(columns=[c for c in _HIDDEN_IN_PREVIEW if c in df.columns]).iloc[:_MAX_TABLE_ROWS, :_MAX_TABLE_COLS].copy()
+    for c in df.columns:
+        if not (pd.api.types.is_numeric_dtype(df[c]) or pd.api.types.is_bool_dtype(df[c])):
+            df[c] = df[c].astype(str).where(df[c].notna(), None)
+    df.columns = [str(c) for c in df.columns]
+    return df.astype(object).where(df.notna(), None).to_dict('records')
+
+
+def _final_message(raw, steps, values, messages, audiences=None):
     text, spec = parse_target_conditions(_CODE_BLOCK.sub('', raw))
     message = {'role': 'assistant', 'text': text or "분석을 마쳤어요.", 'steps': steps}
+    # 🌟 [분석 → 타겟 연결] 최종 답변이 "이 집단"을 가리킬 때만(JSON의 "대상자") 타겟팅으로 보낼 수 있게 붙인다
+    audience_spec = spec.get('대상자') if isinstance(spec.get('대상자'), dict) else None
+    if audience_spec and audiences:
+        step_no = audience_spec.get('단계') if audience_spec.get('단계') in audiences else max(audiences)
+        message['audience'] = {'설명': str(audience_spec.get('설명') or '분석에서 찾은 집단')[:80],
+                               'ids': audiences[step_no], 'count': len(audiences[step_no])}
     graph = spec.get('그래프') if isinstance(spec.get('그래프'), dict) else None
     if graph:
         value = values.get(graph.get('단계')) if graph.get('단계') in values else (values[max(values)] if values else None)
@@ -457,6 +451,14 @@ def _final_message(raw, steps, values, messages):
             data = None
         if data:
             message['data'] = data
+    # 답변의 핵심 결과표(그래프로 가리킨 단계, 없으면 마지막으로 표를 낸 단계)를 다운로드할 수 있게 함께 담는다
+    table_step = (graph or {}).get('단계') if (graph or {}).get('단계') in values else None
+    if table_step is None:
+        table_step = next((n for n in sorted(values, reverse=True) if _as_frame(values[n]) is not None), None)
+    if table_step is not None:
+        records = _table_records(values[table_step])
+        if records:
+            message['table'] = records
     if spec.get('그래프요청') is True:
         source = message.get('data') or (_last_data_message(messages) or {}).get('data')
         if source:
@@ -470,6 +472,7 @@ def _final_message(raw, steps, values, messages):
 if __name__ == "__main__":
     import json
 
+    ISOLATED = False  # 아래 흐름 테스트는 같은 프로세스에서(빠르게). 격리 프로세스는 마지막에 따로 실제로 띄워서 확인한다
     views = pd.DataFrame({
         'R고객번호': ['1', '2', '1', '3', '4'], '이웃고객명': ['가', '나', '가', '다', '라'], '콘텐츠ID': ['a'] * 5,
         '시청자SO': ['㈜씨엠비', '㈜씨엠비동대전방송', '㈜씨엠비', '㈜씨엠비대구방송', '㈜씨엠비수성방송'],
@@ -575,6 +578,18 @@ jul, aug = m['2026-07'], m['2026-08']
     assert run_code("x = 1", tables, {})['error'].startswith("`결과`"), "결과를 안 담으면 오류로 알려준다"
     assert run_code("result = 1", tables, {})['value'] == 1, "영어 이름 result도 결과로 받는다"
     assert run_code("import pandas as pd\n결과 = pd.Series([1]).sum()", tables, {})['value'] == 1
+    # 오류 1: 정상 답변의 "결과: 대전이…" 줄은 통과, 내용 없는 "출력:" 줄과 "[2단계]"는 여전히 가짜로 본다
+    assert _invalid_reason("분석을 마쳤어요.\n결과: 대전이 890명으로 가장 많아요.\n```json\n{\"그래프\": null}\n```", False) is None
+    assert _invalid_reason("출력:\n대전 999\n```json\n{}\n```", False) and _invalid_reason("[2단계] 다음\n```json\n{}\n```", False)
+    # 오류 2: 이전 답변에서 "확인 안 됨"으로 표시된 숫자는 다음 질문의 근거로 쓰이지 않는다
+    prev = [{'role': 'assistant', 'text': "대전 1,514명이에요.\n\n⚠️ 이 답변의 숫자 중 1,514은(는) 실행 결과로 확인되지 않았어요. '계산 과정 보기'의 실제 결과와 대조해서 봐주세요.",
+             'unverified': ['1,514']}, {'role': 'assistant', 'text': "890명", 'steps': [{'preview': "대전,890", 'printed': ''}]}]
+    assert ungrounded_numbers("대전 1,514명", _evidence_text(prev, [], "다시 알려줘")) == ['1,514']
+    assert ungrounded_numbers("대전 890명", _evidence_text(prev, [], "다시 알려줘")) == []
+    # 오류 3: "피드백"이라는 단어만으로는 피드백 모드가 아니다
+    assert not is_feedback_request("피드백 많은 콘텐츠 알려줘") and not is_feedback_request("댓글 피드백이 많은 영상은?")
+    assert is_feedback_request("이거 전체랑 비교해서 피드백 줘") and is_feedback_request("미시 거시 관점으로 평가해줘")
+    assert is_feedback_request(FEEDBACK_REQUEST_TEXT) and is_feedback_request("피드백 해줘")
     # 원인 질문인데 너무 일찍 끝내면 한 번 더 파고들게 하고, 그래도 끝내면 그 답변을 받는다
     prompts_seen = []
     replies = iter(["5건이에요.\n```json\n{\"그래프\": null}\n```"] * 3)
@@ -586,4 +601,48 @@ jul, aug = m['2026-07'], m['2026-08']
     globals()['generate_code_analyst_step'] = lambda prompt: next(replies)
     trimmed = run_analyst_turn([], "몇 건?", tables)
     assert trimmed['steps'][0]['preview'] == '5' and trimmed['text'] == '5건이에요.'
+    # 분석 → 타겟 연결: 코드가 `대상자`에 담은 집단은 최종 답변이 가리킬 때만 message['audience']로 붙는다
+    replies = iter([
+        "대전 시청자를 찾을게\n```python\n결과 = 시청.groupby('SO권역')['R고객번호'].nunique().reset_index(name='MAU')\n"
+        "대상자 = 시청[시청['SO권역'] == '대전']['R고객번호']\n```",
+        '대전 시청자는 2명이에요.\n```json\n{"그래프": null, "대상자": {"단계": 1, "설명": "대전 시청자"}}\n```',
+    ])
+    globals()['generate_code_analyst_step'] = lambda prompt: next(replies)
+    found = run_analyst_turn([], "대전 시청자 찾아줘", tables)
+    assert found['audience'] == {'설명': '대전 시청자', 'ids': ['1', '2'], 'count': 2} and '고객 2명이 지정됨' in found['steps'][0]['preview']
+    json.dumps(found, ensure_ascii=False)
+    replies = iter(["집단 찾기\n```python\n결과 = 시청.head(1)\n대상자 = ['1', '999']\n```", '끝.\n```json\n{"그래프": null, "대상자": null}\n```'])
+    assert 'audience' not in run_analyst_turn([], "몇 명?", tables), "최종 답변이 가리키지 않으면 버튼을 만들지 않는다"
+    assert sandbox.normalize_audience(pd.DataFrame({'R고객번호': [3, '3', None, 'x']})) == ['3', 'x'] and sandbox.normalize_audience(5) is None
+
+    # 별도 프로세스 격리(실제 프로세스를 띄워서): 결과·집단 전달, 시간 초과 시 실제 종료 + 복구, 프로세스 사망 복구, 탈출 차단
+    session = SandboxSession(tables, list(_REGION_ORDER), timeout=5, startup_timeout=90)
+    try:
+        r1 = session.run("결과 = 시청.groupby('SO권역')['R고객번호'].nunique().reset_index(name='MAU')\n대상자 = 시청[시청['SO권역'] == '대구']['R고객번호']", 1)
+        assert list(r1['value']['MAU']) == [2, 2] and r1['audience'] == ['3', '4'], r1
+        slow = session.run("결과 = sum([sum(range(900000)) for _ in range(900000)])", 2)
+        assert '초 안에' in slow['error'] and session.proc is None, slow
+        r3 = session.run("결과 = 이전결과[1]['MAU'].sum()", 3)   # 새 프로세스가 앞 단계 결과를 이어받는다
+        assert r3['value'] == 4, r3
+        session.proc.kill(); session.proc.wait()
+        r4 = session.run("결과 = 1 + 1", 4)                      # 죽은 프로세스는 자동으로 다시 뜬다
+        assert r4['value'] == 2, r4
+        assert 'error' in session.run("결과 = str(pd.io.common.os)", 5) and 'error' in session.run("결과 = 시청['없음']", 6)
+        big = session.run("결과 = pd.DataFrame({'a': list(range(300000))})", 7)   # 큰 표는 잘려서(20만 행) 돌아온다
+        assert len(big['value']) == sandbox.MAX_RESULT_ROWS
+    finally:
+        session.close()
+    # 프로세스를 시작하지 못하는 환경이면 같은 프로세스로 대신하고, 그 사실을 남긴다
+    class _Unavailable:
+        def __init__(self, *a, **k): raise SandboxUnavailable("테스트")
+    ISOLATED, real_session = True, SandboxSession
+    globals()['SandboxSession'] = _Unavailable
+    replies = iter(["계산\n```python\n결과 = len(시청)\n```", '5건이에요.\n```json\n{"그래프": null}\n```'])
+    fallback = run_analyst_turn([], "몇 건?", tables)
+    globals()['SandboxSession'] = real_session
+    assert fallback['text'] == '5건이에요.' and any('같은 프로세스에서 실행' in c for c in fallback['checks']), fallback
+    # 표 다운로드용 결과표: 고객번호 컬럼 제외, 날짜는 글자로, JSON 저장 가능
+    recs = _table_records(pd.DataFrame({'R고객번호': ['1', '2'], '월': pd.to_datetime(['2026-08-01', '2026-09-01']), 'MAU': [3, None]}))
+    assert recs == [{'월': '2026-08-01', 'MAU': 3.0}, {'월': '2026-09-01', 'MAU': None}], recs
+    json.dumps(recs)
     print("code_analyst self-check OK")

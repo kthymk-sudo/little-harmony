@@ -97,12 +97,7 @@ def _period_bounds(period):
     return _parse(period.get('시작'), False), _parse(period.get('종료'), True)
 
 
-def data_period_str(db_audience):
-    """AI가 "7월", "최근 3개월" 같은 말을 실제 날짜로 바꿀 수 있게 적재된 기간을 알려준다."""
-    if db_audience is None or db_audience.empty or '시청일' not in db_audience.columns:
-        return ""
-    return (f"- 적재된 시청 데이터 기간: {db_audience['시청일'].min()} ~ {db_audience['시청일'].max()} "
-            f"(기간을 정할 때는 이 범위 안에서)")
+from database.audience import data_period_line as data_period_str  # 같은 안내를 타겟팅과 함께 쓴다
 
 
 def _match_label(text, available):

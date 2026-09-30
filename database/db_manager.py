@@ -26,7 +26,8 @@ from database.audience import (
     summarize_content_ranking, format_content_ranking_reply,
     summarize_group_breakdown, format_group_breakdown_reply,
     _matching_ids_by_keyword, _as_list, _to_num, _filter_by_conditions,
-    _parse_recent_date_condition, _normalize_field_name,
+    _parse_recent_date_condition, _normalize_field_name, describe_term_matches,
+    describe_period_warnings, data_period_line,
 )
 from database.formatting import (
     format_conditions_line, format_target_summary,

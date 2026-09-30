@@ -252,7 +252,7 @@ def _as_list(val):
     return [val]
 
 
-def _series_intersects(series, target_values):
+def _series_intersects(series, target_values, contains=False):
     """
     🌟 [취향 다각도 분석] 선호장르/선호채널/선호메뉴/선호시청시간대는 이제 고객별로
     "리스트"를 담는다(_pref_list_by_customer 참고). 예전처럼 .isin()을 그대로
@@ -262,18 +262,146 @@ def _series_intersects(series, target_values):
     목록이 하나라도 겹치는가"로 바꿔야 한다 - 드라마/다큐를 둘 다 선호하는
     고객은 "드라마 좋아하는 사람" 조건에도, "다큐 좋아하는 사람" 조건에도
     똑같이 매칭되는 게 맞다.
+
+    🌟 [키워드 매칭] contains=True면 "정확히 같은 값"이 아니라 "그 말이 들어간 값"도 겹친 것으로
+    본다(장르 "트로트"로 찾으면 "트로트 예능"도, "드라마"로 찾으면 "해외 드라마"도). 시청시간대("18시")는
+    부분일치하면 "8시"가 "18시"와 겹치는 문제가 있어 정확히 같을 때만 쓴다(contains=False).
     """
     target_set = {str(v) for v in target_values}
+    lowered = [t.lower() for t in target_set if t]
+
+    def _matches(pref):
+        p = str(pref)
+        return p in target_set or (contains and any(t in p.lower() for t in lowered))
 
     def _has_overlap(prefs):
         if prefs is None:
             return False
         if isinstance(prefs, (list, tuple, set)):
-            return bool({str(p) for p in prefs} & target_set)
+            return any(_matches(p) for p in prefs)
         # 혹시 과거 데이터/다른 경로로 아직 스칼라 값이 들어와도 방어적으로 처리
-        return str(prefs) in target_set
+        return _matches(prefs)
 
     return series.apply(_has_overlap)
+
+
+# ------------------------------------------------------------
+# 🌟 [기간 안에 한 행동] "최근 한 달 동안 트로트 본 분들"은 원래 두 조건("트로트를 선호하는 사람" AND
+# "최근 30일 안에 뭐든 본 사람")으로 쪼개져서, 실제로 그 기간에 트로트를 본 사람보다 훨씬 적게
+# 잡혔다(29명 vs 실제 47명). 기간과 시청 대상을 한 묶음으로 시청이력에서 직접 찾는다.
+# 조건 형태: {"기간": "30일 이내" 또는 {"시작": "2026-08", "종료": "2026-08"},
+#            "장르포함": [...], "채널명포함": [...], "메뉴명포함": [...], "콘텐츠명포함": [...], "최소횟수": 2}
+# 기간은 생략 가능, 시청 대상 키는 여러 개면 모두 만족(AND), 한 키 안의 값들은 하나라도(OR).
+# ------------------------------------------------------------
+_WITHIN_KEYWORD_COLUMNS = {'장르포함': '장르', '채널명포함': '채널명', '메뉴명포함': '메뉴명',
+                           '콘텐츠명포함': '영상명', '시리즈명포함': '시리즈명'}
+
+
+def _month_bounds(text, is_end):
+    month = pd.Period(text, freq='M')
+    return (month.end_time if is_end else month.start_time).strftime('%Y-%m-%d')
+
+
+def _behavior_period(period, db_audience=None):
+    """기간 표현 -> ('YYYY-MM-DD' 시작, 종료). 모르는 표현은 그쪽 제한 없음(None)."""
+    def _one(val, is_end):
+        text = str(val or '').strip()
+        if not text:
+            return None
+        if re.fullmatch(r'\d{4}-\d{1,2}', text):
+            return _month_bounds(text, is_end)
+        parsed = pd.to_datetime(text, errors='coerce')
+        return None if pd.isna(parsed) else parsed.strftime('%Y-%m-%d')
+
+    if isinstance(period, dict):
+        return _one(period.get('시작'), False), _one(period.get('종료'), True)
+    if period:
+        return _parse_recent_date_condition(period, db_audience), None
+    return None, None
+
+
+def _ids_viewed_within(db_audience, cond):
+    """기간 안에 조건에 맞는 시청을 한 고객번호 집합. 조건에서 아무것도 읽지 못하면 None(조건 무시)."""
+    if db_audience is None or db_audience.empty or not isinstance(cond, dict):
+        return None
+    start, end = _behavior_period(cond.get('기간'), db_audience)
+    keyword_filters = [(col, _as_list(cond[key])) for key, col in _WITHIN_KEYWORD_COLUMNS.items()
+                       if cond.get(key) and col in db_audience.columns]
+    if not (start or end or keyword_filters):
+        return None
+    rows = db_audience
+    if start:
+        rows = rows[rows['시청일'] >= start]
+    if end:
+        rows = rows[rows['시청일'] <= end]
+    for col, terms in keyword_filters:
+        text = rows[col].astype(str)
+        mask = pd.Series(False, index=rows.index)
+        for term in terms:
+            mask = mask | text.str.contains(str(term), case=False, na=False, regex=False)
+        rows = rows[mask]
+    min_count = _to_num(cond.get('최소횟수'))
+    ids = rows['R고객번호'].astype(str)
+    if min_count and min_count > 1:
+        counts = ids.value_counts()
+        return set(counts[counts >= min_count].index)
+    return set(ids.unique())
+
+
+def data_period_line(db_audience):
+    """AI가 "8월", "최근 3개월" 같은 말을 실제 날짜로 바꿀 수 있게 적재된 시청 데이터의 기간을 알려주는 한 줄."""
+    if db_audience is None or db_audience.empty or '시청일' not in db_audience.columns:
+        return ""
+    return (f"- 적재된 시청 데이터 기간: {db_audience['시청일'].min()} ~ {db_audience['시청일'].max()} "
+            f"(연도가 없는 기간 표현은 이 범위 안의 연도로 해석할 것)")
+
+
+def describe_period_warnings(db_audience, conditions):
+    """🌟 [기간 확인] 지정한 기간이 적재된 데이터 범위 밖이면 대상자가 조용히 0명이 되므로 이유를 알려준다
+    (AI가 연도를 잘못 짚는 경우 등)."""
+    if db_audience is None or db_audience.empty or not isinstance(conditions, dict):
+        return []
+    within = conditions.get('기간내시청')
+    if not isinstance(within, dict) or not within.get('기간'):
+        return []
+    start, end = _behavior_period(within['기간'], db_audience)
+    first, last = db_audience['시청일'].min(), db_audience['시청일'].max()
+    if (start and start > last) or (end and end < first):
+        return [f"지정한 기간({start or '처음'} ~ {end or '마지막'})에는 시청 데이터가 없어요 - 적재된 기간은 {first} ~ {last}예요"]
+    return []
+
+
+_PREFERENCE_VALUE_COLUMNS = {'선호장르': ('장르', '장르'), '선호채널': ('채널명', '채널'), '선호메뉴': ('메뉴명', '메뉴')}
+
+
+def describe_term_matches(db_audience, conditions):
+    """🌟 [키워드 매칭 안내] 실무자가 쓴 말이 실제 데이터의 어떤 값들에 걸렸는지 알려주는 안내문 목록.
+    "트로트"가 "트로트", "트로트 예능"을 포함해서 찾는다는 것, 또는 걸리는 값이 하나도 없다는 것(대상자가
+    0명일 때 이유가 된다)을 알린다."""
+    if db_audience is None or db_audience.empty or not conditions:
+        return []
+    targets = []  # (표시 이름, 컬럼, 검색어들)
+    for key, (col, label) in _PREFERENCE_VALUE_COLUMNS.items():
+        if conditions.get(key):
+            targets.append((label, col, _as_list(conditions[key])))
+    within = conditions.get('기간내시청')
+    if isinstance(within, dict):
+        for key, col in (('장르포함', '장르'), ('채널명포함', '채널명'), ('메뉴명포함', '메뉴명')):
+            if within.get(key) and col in db_audience.columns:
+                targets.append((col.replace('명', ''), col, _as_list(within[key])))
+    notes = []
+    for label, col, terms in targets:
+        if col not in db_audience.columns:
+            continue
+        counts = db_audience[col].dropna().astype(str).value_counts()
+        for term in terms:
+            hits = [v for v in counts.index if str(term).lower() in v.lower()]
+            if not hits:
+                notes.append(f"'{term}' 검색 → 일치하는 {label} 값이 데이터에 없어요")
+            elif set(hits) != {str(term)}:
+                shown = ', '.join(hits[:5]) + (f" 외 {len(hits) - 5}개" if len(hits) > 5 else "")
+                notes.append(f"'{term}' 검색 → {label} {shown} 등을 모두 포함해서 찾아요")
+    return notes
 
 
 def _parse_recent_date_condition(val, db_audience=None):
@@ -337,12 +465,13 @@ _CANONICAL_CONDITION_FIELDS = {
     '성별', '나이대', '나이최소', '나이최대', 'SO', '선호장르', '선호시청시간대',
     '선호채널', '선호메뉴', '최소시청횟수', '최근시청일이후', '최소시청유지율',
     '최소총시청시간_분', '최소시청콘텐츠수', '활동세그먼트', '콘텐츠명포함',
-    '채널명포함', '제외조건', '상위N명',
+    '채널명포함', '제외조건', '상위N명', '기간내시청',
 }
 
 _CONDITION_FIELD_ALIASES = {
     '나이': '나이대', '연령': '나이대', '연령대': '나이대',
     '지역': 'SO', '거주지역': 'SO', 'so지역': 'SO',
+    '기간내': '기간내시청', '기간내행동': '기간내시청', '기간행동': '기간내시청', '시청이력': '기간내시청',
     '장르': '선호장르',
     '시간대': '선호시청시간대', '시청시간대': '선호시청시간대',
     '채널': '선호채널',
@@ -437,13 +566,13 @@ def _filter_by_conditions(profile_df, conditions, db_audience=None):
     # 여러 값을 담는 리스트 컬럼이라(_pref_list_by_customer), .isin() 대신
     # "겹치는 게 있는지"를 보는 _series_intersects()로 필터링한다.
     if conditions.get('선호장르'):
-        df = df[_series_intersects(df['선호장르'], _as_list(conditions['선호장르']))]
+        df = df[_series_intersects(df['선호장르'], _as_list(conditions['선호장르']), contains=True)]
     if conditions.get('선호시청시간대'):
         df = df[_series_intersects(df['선호시청시간대'], _as_list(conditions['선호시청시간대']))]
     if conditions.get('선호채널') and '선호채널' in df.columns:
-        df = df[_series_intersects(df['선호채널'], _as_list(conditions['선호채널']))]
+        df = df[_series_intersects(df['선호채널'], _as_list(conditions['선호채널']), contains=True)]
     if conditions.get('선호메뉴') and '선호메뉴' in df.columns:
-        df = df[_series_intersects(df['선호메뉴'], _as_list(conditions['선호메뉴']))]
+        df = df[_series_intersects(df['선호메뉴'], _as_list(conditions['선호메뉴']), contains=True)]
     if conditions.get('활동세그먼트') and '활동세그먼트' in df.columns:
         df = df[df['활동세그먼트'].isin(_as_list(conditions['활동세그먼트']))]
     min_watch_cnt = _to_num(conditions.get('최소시청횟수'))
@@ -468,6 +597,15 @@ def _filter_by_conditions(profile_df, conditions, db_audience=None):
     if conditions.get('채널명포함'):
         ids = _matching_ids_by_keyword(db_audience, '채널명', conditions['채널명포함'])
         df = df[df['R고객번호'].astype(str).isin(ids)]
+    # 🌟 [기간 안에 한 행동] 기간과 시청 대상을 시청이력에서 한 번에 찾는다(위 _ids_viewed_within 참고)
+    if conditions.get('기간내시청'):
+        ids = _ids_viewed_within(db_audience, conditions['기간내시청'])
+        if ids is not None:
+            df = df[df['R고객번호'].astype(str).isin(ids)]
+    # 🌟 [분석 → 타겟 연결] 분석 탭에서 찾아 가져온 집단은 고객번호 목록으로 고정된다
+    # ('__' 접두사 키는 AI에게 보이지 않고 삭제할 수도 없다)
+    if conditions.get('__고객번호'):
+        df = df[df['R고객번호'].astype(str).isin(set(conditions['__고객번호']))]
 
     return df
 
@@ -800,3 +938,29 @@ def apply_target_conditions(profile_df, conditions, db_audience=None):
         '전체평균시청유지율': _mean(profile_df, '평균시청유지율'),
     }
     return df, stats
+
+
+if __name__ == "__main__":
+    views = pd.DataFrame({
+        'R고객번호': ['1', '1', '2', '3', '4', '5'], '시청일': ['2026-08-01', '2026-08-05', '2026-07-01', '2026-08-20', '2026-09-01', '2026-08-10'],
+        '장르': ['트로트', '트로트 예능', '트로트', '드라마', '트로트', '해외 드라마'], '채널명': ['A', 'A', 'B', 'A', 'B', 'A'],
+    })
+    profile = pd.DataFrame({'R고객번호': ['1', '2', '3', '4', '5'], '성별': ['여자'] * 5,
+                            '선호장르': [['트로트'], ['트로트'], ['드라마'], [], ['드라마']]})
+    # 기간 안에 한 행동: 8월(전체 달)에 트로트 계열을 본 사람 = 1번(2회)뿐. 2번은 7월, 4번은 9월
+    within = {'기간': {'시작': '2026-08', '종료': '2026-08'}, '장르포함': ['트로트']}
+    assert _ids_viewed_within(views, within) == {'1'}
+    assert _ids_viewed_within(views, {**within, '최소횟수': 2}) == {'1'} and _ids_viewed_within(views, {**within, '최소횟수': 3}) == set()
+    assert _ids_viewed_within(views, {}) is None and _ids_viewed_within(views, {'기간': '알수없음'}) is None
+    assert set(_filter_by_conditions(profile, {'기간내시청': within}, views)['R고객번호']) == {'1'}
+    # 키워드 매칭: "드라마"는 "해외 드라마"도, 시간대는 정확히 같을 때만
+    assert set(_filter_by_conditions(profile, {'선호장르': ['드라마']}, views)['R고객번호']) == {'3', '5'}
+    assert list(_series_intersects(pd.Series([['18시'], ['8시']]), ['8시'], contains=False)) == [False, True]
+    assert list(_series_intersects(pd.Series([['해외 드라마'], ['예능']]), ['드라마'], contains=True)) == [True, False]
+    notes = describe_term_matches(views, {'선호장르': ['트로트', '없는장르'], '기간내시청': {'장르포함': ['드라마']}})
+    assert any("트로트 예능" in n for n in notes) and any("'없는장르' 검색 → 일치하는 장르 값이 데이터에 없어요" in n for n in notes) and any("해외 드라마" in n for n in notes)
+    # 분석에서 가져온 고객번호 목록으로 고정
+    assert set(_filter_by_conditions(profile, {'__고객번호': ['2', '9']}, views)['R고객번호']) == {'2'}
+    assert data_period_line(views).startswith("- 적재된 시청 데이터 기간: 2026-07-01 ~ 2026-09-01")
+    assert describe_period_warnings(views, {'기간내시청': {'기간': {'시작': '2024-08', '종료': '2024-08'}}}) and         not describe_period_warnings(views, {'기간내시청': {'기간': {'시작': '2026-08', '종료': '2026-08'}}})
+    print("audience self-check OK")

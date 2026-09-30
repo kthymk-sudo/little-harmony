@@ -10,7 +10,7 @@ from database.db_manager import (
     summarize_profile_context, summarize_segment_insight, format_segment_insight_reply,
     summarize_content_ranking, format_content_ranking_reply,
     summarize_group_breakdown, format_group_breakdown_reply,
-    _normalize_field_name,
+    _normalize_field_name, describe_term_matches, describe_period_warnings, data_period_line,
 )
 from utils.response_parser import parse_target_conditions
 from utils.naver_search import search_term_meaning
@@ -19,8 +19,10 @@ from utils.naver_search import search_term_meaning
 def process_target_turn(messages, conditions, user_text, profile_df, db_audience=None):
     """타겟 설정 대화 한 턴 처리 (Streamlit 비의존 - 단위 테스트 가능)."""
     history_with_user = messages + [{"role": "user", "text": user_text}]
-    profile_context_str = summarize_profile_context(profile_df)
-    conditions_str = json.dumps(conditions or {}, ensure_ascii=False)
+    profile_context_str = summarize_profile_context(profile_df) + "\n" + data_period_line(db_audience)
+    # '__' 접두사 키(분석 탭에서 가져온 고객번호 목록 등)는 내부용이라 AI에게는 보내지 않는다
+    visible_conditions = {k: v for k, v in (conditions or {}).items() if not k.startswith('__')}
+    conditions_str = json.dumps(visible_conditions, ensure_ascii=False)
 
     ai_raw = generate_target_chat_reply(history_with_user, profile_context_str, conditions_str)
     reply_text, parsed_conditions = parse_target_conditions(ai_raw)
@@ -156,6 +158,19 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
             reply_text = fallback_reply if is_api_error(ai_breakdown_reply) else ai_breakdown_reply
         else:
             reply_text = fallback_reply
+
+    # 🌟 [키워드 매칭 안내] 이번 턴에 새로 나온 장르/채널/메뉴 조건이 실제 데이터의 어떤 값에 걸렸는지 알려준다
+    # (질문 답변 턴이 아니라 조건을 정하는 턴에서만 - 조건이 그대로면 매번 반복하지 않는다)
+    is_answer_turn = bool(
+        (isinstance(question_conditions, dict) and question_conditions)
+        or (isinstance(content_ranking_question, dict) and content_ranking_question.get('대상') and content_ranking_question.get('기준'))
+        or (isinstance(group_breakdown_question, dict) and group_breakdown_question.get('기준필드'))
+    )  # (빈 틀만 채워 온 {"대상": "", ...}는 질문이 아니다)
+    if not is_answer_turn:
+        new_only = {k: v for k, v in merged_conditions.items() if (conditions or {}).get(k) != v}
+        notes = describe_period_warnings(db_audience, new_only) + describe_term_matches(db_audience, new_only)
+        if notes:
+            reply_text = reply_text.rstrip() + "\n\nℹ️ " + "\nℹ️ ".join(notes)
 
     new_messages = history_with_user + [{"role": "assistant", "text": reply_text}]
     return new_messages, merged_conditions
