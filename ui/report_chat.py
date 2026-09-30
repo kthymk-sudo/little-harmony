@@ -17,7 +17,7 @@ from ui.chart_render import render_chart_card
 from ui.chat_styles import inject_chat_css, render_message
 from database.db_manager import save_simple_conversation
 from ui import job_runner
-from utils.mindmap_svg import mindmap_svg
+from utils.mindmap_svg import mindmap_svg, mindmap_html
 from ui.target_card import autosave_simple
 from utils.emm_export import build_emm_from_nodes, merge_report_trees, parse_report_tree, strip_tree_lines
 
@@ -92,9 +92,9 @@ def _render_merge_panel(messages):
 
         view = st.segmented_control("보기", list(_DEPTHS), default="한눈에", key=f"map_view_{conv}", label_visibility="collapsed") or "한눈에"
         svg, hidden = mindmap_svg(nodes, title=title, max_depth=_DEPTHS[view])
-        st.markdown(f'<div class="hp-mindmap">{svg}</div>', unsafe_allow_html=True)
+        _show_map(svg)
         st.caption(f"{len(nodes)}개 항목 · " + (f"'{view}'로 그려서 {hidden}개 항목이 숨겨져 있어요. 위에서 '3단계'나 '전체'를 눌러 보세요. " if hidden else "모든 항목을 보여줘요. ")
-                   + "고치고 싶으면 대화로 말씀해 주세요(예: 'SO가 가장 큰 가지로', '요약해서 다시 만들어줘', '조회수를 맨 위로').")
+                   + "그림은 확대·축소하고 끌어서 옮길 수 있어요. 고치고 싶으면 대화로 말씀해 주세요(예: 'SO가 가장 큰 가지로', '요약해서 다시 만들어줘', '조회수를 맨 위로').")
         with st.expander("글로 보기", icon=":material/notes:"):
             st.code("\n".join("  " * d + t for d, t in nodes), language=None)
         st.download_button("최종 알마인드 다운로드 (.emm)", icon=":material/download:", data=build_emm_from_nodes(nodes, title),
@@ -103,6 +103,12 @@ def _render_merge_panel(messages):
 
 def _has_tree(turn):
     return turn["role"] == "assistant" and len(parse_report_tree(turn["text"])) >= 3
+
+
+def _show_map(svg):
+    """알마인드 그림을 확대·축소·이동할 수 있게 보여준다(브라우저 안에서만 움직여서 서버를 다시 부르지 않는다)."""
+    page, height = mindmap_html(svg)
+    st.iframe(page, height=height)
 
 
 def _tree_done_sentence(turn):
@@ -117,7 +123,7 @@ def _render_preview(text):
     nodes = parse_report_tree(text)
     svg, _ = mindmap_svg(nodes, max_depth=3)
     if svg:
-        st.markdown(f'<div class="hp-mindmap">{svg}</div>', unsafe_allow_html=True)
+        _show_map(svg)
         st.caption("예시 그림이에요. 마음에 들면 '이 구성으로 취합안 만들어줘'라고 말씀해 주세요.")
 
 
