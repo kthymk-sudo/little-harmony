@@ -20,10 +20,10 @@ from plotly.subplots import make_subplots
 from services.analysis_service import normalize_pivot_result, describe_pivot
 
 # 색각 이상 검증을 통과한 범주 팔레트(순서가 곧 구분성 - 순서를 바꾸거나 돌려쓰지 않는다)
-_CATEGORICAL = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#4a3aa7', '#e34948']
-_SEQUENTIAL = [[0, '#cde2fb'], [0.25, '#86b6ef'], [0.5, '#3987e5'], [0.75, '#256abf'], [1, '#104281']]
-_UP, _DOWN = '#2a78d6', '#e34948'
-_GRID, _AXIS, _INK = '#e1e0d9', '#c3c2b7', '#52514e'
+_CATEGORICAL = ['#2563EB', '#F97316', '#10B981', '#F59E0B', '#EC4899', '#0EA5E9', '#7C3AED', '#EF4444']  # 첫 색 = 앱 브랜드 파랑
+_SEQUENTIAL = [[0, '#DBE7FE'], [0.25, '#93B4F8'], [0.5, '#4F86F0'], [0.75, '#2563EB'], [1, '#1E3A8A']]
+_UP, _DOWN = '#2563EB', '#EF4444'
+_GRID, _AXIS, _INK = '#E3E8F2', '#CBD5E1', '#334155'  # 앱 UI(chat_styles.py)와 같은 차가운 블루그레이
 _BAR_LABEL_MAX_ROWS = 40   # 막대가 이보다 많으면 막대 위 숫자는 생략(빽빽해짐)
 _HEATMAP_TEXT_MAX_CELLS = 300
 
@@ -204,7 +204,7 @@ def build_pivot_chart_figure(chart_spec):
         title += f"<br><sup>{data['데이터기준']}</sup>"
     fig.update_layout(
         title=title, height=height, margin=dict(t=100, b=10, l=10, r=30), barcornerradius=4,
-        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color=_INK),
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)', font=dict(color=_INK, family='"Source Sans", "Malgun Gothic", sans-serif'),
         legend_title_text=' · '.join(data.get('열') or []) or None,
     )
     fig.update_xaxes(gridcolor=_GRID, linecolor=_AXIS, zeroline=False, automargin=True)

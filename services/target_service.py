@@ -168,9 +168,10 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
     )  # (빈 틀만 채워 온 {"대상": "", ...}는 질문이 아니다)
     if not is_answer_turn:
         new_only = {k: v for k, v in merged_conditions.items() if (conditions or {}).get(k) != v}
-        notes = describe_period_warnings(db_audience, new_only) + describe_term_matches(db_audience, new_only)
+        # 같은 검색어가 선호장르와 기간내시청 장르포함에 함께 있으면 안내가 두 번 나오므로 한 번만 남긴다
+        notes = list(dict.fromkeys(describe_period_warnings(db_audience, new_only) + describe_term_matches(db_audience, new_only)))
         if notes:
-            reply_text = reply_text.rstrip() + "\n\nℹ️ " + "\nℹ️ ".join(notes)
+            reply_text = reply_text.rstrip() + "\n\n[참고]\n· " + "\n· ".join(notes)
 
     new_messages = history_with_user + [{"role": "assistant", "text": reply_text}]
     return new_messages, merged_conditions

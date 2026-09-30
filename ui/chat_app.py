@@ -31,7 +31,7 @@ def render_chat_app(profile_df, db_audience=None):
             st.session_state.target_conditions, st.session_state.target_result_stats
         )
 
-    st.title("🎯 타겟팅 & 카피")
+    st.title(":material/campaign: 타겟팅 & 카피")
     st.caption("시청 데이터를 바탕으로 AI와 대화하며 앱푸시 타겟을 정하고, 근거를 확인하고, 카피까지 작성하세요.")
 
     if not st.session_state.messages:

@@ -59,7 +59,7 @@ def render_target_card():
         m2.metric("전체 시청자 대비 비중", share)
         if stats.get('전체평균시청유지율'):
             st.caption(
-                f"📊 이 타겟의 평균 시청유지율 {stats.get('평균시청유지율', 0)}% "
+                f":material/monitoring: 이 타겟의 평균 시청유지율 {stats.get('평균시청유지율', 0)}% "
                 f"(전체 평균 {stats.get('전체평균시청유지율', 0)}%) · "
                 f"평균 총시청시간 {stats.get('평균총시청시간(분)', 0)}분 "
                 f"(전체 평균 {stats.get('전체평균총시청시간(분)', 0)}분)"
@@ -73,7 +73,8 @@ def render_target_card():
         with st.container(border=True):
             st.caption("R고객번호 엑셀 다운로드")
             st.download_button(
-                "📥 R고객번호 엑셀 다운로드 (캠페인 업로드 양식)",
+                "R고객번호 엑셀 다운로드 (캠페인 업로드 양식)",
+                icon=":material/download:",
                 data=_build_customer_id_excel(st.session_state.target_result_df),
                 file_name="레인보우TV_이웃고객관리목록.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -84,12 +85,12 @@ def render_target_card():
         # 빈 값으로 남겨둔다(에러 문구를 정상 근거처럼 저장하지 않기 위해). 그 상태로
         # 대화를 나중에 다시 열어봤을 때도 왜 근거가 없는지 알 수 있도록 안내한다.
         if not st.session_state.get('target_reasoning'):
-            st.caption("⚠️ AI 근거 설명 생성에 실패했었습니다. 채팅창에 메시지를 입력하면 조건이 다시 처리되면서 근거도 함께 갱신됩니다.")
+            st.caption(":material/warning: AI 근거 설명 생성에 실패했었습니다. 채팅창에 메시지를 입력하면 조건이 다시 처리되면서 근거도 함께 갱신됩니다.")
 
         col_push, col_sms = st.columns(2)
         with col_push:
             if st.button(
-                "📱 앱푸시 카피 작성",
+                "앱푸시 카피 작성", icon=":material/smartphone:",
                 disabled=st.session_state.get('push_copy_generated', False),
                 width='stretch',
             ):
@@ -97,7 +98,7 @@ def render_target_card():
                 st.rerun()
         with col_sms:
             if st.button(
-                "✉️ SMS 문자 작성",
+                "SMS 문자 작성", icon=":material/sms:",
                 disabled=st.session_state.get('sms_copy_generated', False),
                 width='stretch',
             ):
@@ -108,11 +109,11 @@ def render_target_card():
             st.caption("아래 채팅창에 원하는 방향을 입력하면 방금 만든 카피를 다시 다듬어드립니다. (예:이벤트, 친근한 느낌)")
             # 🌟 [글자수 맞춰 다시 쓰기] 제한을 넘은 버전이 있으면 버튼 한 번으로 줄여서 다시 쓰게 한다
             if is_over_limit(st.session_state.get('push_copy_result'), st.session_state.get('last_copy_type', 'push')):
-                if st.button("✂️ 글자수 맞춰 다시 쓰기", width='stretch', key="btn_shorten_copy"):
+                if st.button("글자수 맞춰 다시 쓰기", icon=":material/content_cut:", width='stretch', key="btn_shorten_copy"):
                     st.session_state.messages.append({"role": "user", "text": SHORTEN_REQUEST})
                     st.session_state.pending_user_text = SHORTEN_REQUEST
                     st.rerun()
-            if st.button("🎯 타겟 조건 다시 설정하기", width='stretch'):
+            if st.button("타겟 조건 다시 설정하기", icon=":material/tune:", width='stretch'):
                 st.session_state.phase = 'targeting'
                 st.session_state.messages.append({
                     "role": "assistant",
@@ -131,19 +132,23 @@ def render_confirm_bar(profile_df, db_audience):
     (ui/chat_app.py 참고). 조건을 더 이야기해서 바꾼 뒤 다시 눌러 재확정하는 것도
     이 함수 하나로 그대로 지원된다."""
     conditions = st.session_state.target_conditions
-    st.info(f"🔖 현재까지 파악된 조건: {format_conditions_line(conditions)}")
+    short_line, full_line = format_conditions_line(conditions, max_items=3), format_conditions_line(conditions)
+    st.info(f"현재까지 파악된 조건: {short_line}", icon=":material/sell:")
+    if full_line != short_line:  # 긴 목록(장르 등)을 줄여 보여줬으면 전체는 펼쳐서 볼 수 있게
+        with st.expander("조건 전체 보기"):
+            st.write(full_line)
     # 🌟 [예상 인원 미리 보기] 확정을 누르기 전에도 지금 조건에 몇 명이 해당하는지 바로 보여준다
     try:
         _, preview_stats = apply_target_conditions(profile_df, conditions, db_audience)
         n, total = preview_stats.get('대상자수', 0), preview_stats.get('전체시청자수', 0)
         share = f" (전체 {total:,}명의 {n / total * 100:.1f}%)" if total else ""
         if n == 0:
-            st.warning(f"👥 지금 조건에 해당하는 분이 **0명**이에요. 조건을 조금 넓혀볼까요?{share}")
+            st.warning(f"지금 조건에 해당하는 분이 **0명**이에요. 조건을 조금 넓혀볼까요?{share}", icon=":material/warning:")
         else:
-            st.caption(f"👥 지금 조건의 예상 인원: **{n:,}명**{share}")
+            st.caption(f":material/group: 지금 조건의 예상 인원: **{n:,}명**{share}")
     except Exception:  # 미리 보기는 참고용이라 실패해도 확정 흐름은 그대로
         pass
-    if st.button("✅ 이 조건으로 타겟 확정하기", type="primary"):
+    if st.button("이 조건으로 타겟 확정하기", icon=":material/check_circle:", type="primary"):
         with st.spinner("타겟을 계산하고 근거를 정리하는 중..."):
             target_df, stats = apply_target_conditions(profile_df, st.session_state.target_conditions, db_audience)
             summary_str = format_target_summary(st.session_state.target_conditions, stats)

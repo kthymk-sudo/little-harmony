@@ -8,6 +8,7 @@
 # ============================================================
 import html as html_lib
 import math
+import re
 import time
 import streamlit as st
 
@@ -53,12 +54,21 @@ _CHAT_CSS = """
     margin: 0.9rem 0;
     border-color: #E3E8F2;
 }
+/* 사이드바 설명 글씨: 읽기 쉽게 보통 굵기 + 대비 5:1 이상. 작은 대문자 라벨 모양은 "대화 기록" 제목에만 쓴다. */
 [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {
+    font-size: 0.8rem;
+    color: #5B6478;
+}
+[class*="st-key-hp-side-label"] [data-testid="stCaptionContainer"] {
     text-transform: uppercase;
     letter-spacing: 0.04em;
     font-size: 0.72rem;
     font-weight: 700;
-    color: #8A93A6;
+    color: #64748B;
+}
+/* 파일 올리기 영역의 영어 안내("200MB per file • XLSX")는 숨긴다 */
+[data-testid="stFileUploaderDropzoneInstructions"] {
+    display: none;
 }
 /* 대화 목록/새 대화 버튼: nav 아이템처럼 좌측정렬 + 은은한 hover */
 [data-testid="stSidebar"] [data-testid="stButton"] button {
@@ -71,6 +81,14 @@ _CHAT_CSS = """
 [data-testid="stSidebar"] [data-testid="stButton"] button:hover {
     background-color: #EEF2FF;
     border-color: #C7D6FB;
+}
+/* 대화 행의 이름변경/삭제 아이콘 버튼: 좁은 칸이라 여백을 없애고 아이콘을 가운데에 */
+[data-testid="stSidebar"] [data-testid="stColumn"]:not(:first-child) [data-testid="stButton"] button {
+    padding: 0;
+    justify-content: center;
+}
+[data-testid="stSidebar"] [data-testid="stColumn"]:not(:first-child) [data-testid="stButton"] button > div {
+    justify-content: center;
 }
 [data-testid="stSidebar"] [data-testid="stButton"] button p {
     text-overflow: ellipsis;
@@ -161,6 +179,17 @@ _CHAT_CSS = """
     border-radius: 14px;
     border-color: #E3E8F2;
 }
+/* 분석 진행 표시(st.status = 진행/완료/오류 아이콘이 붙은 expander)는 답변 말풍선과 같은 옅은 배경으로 */
+[data-testid="stExpander"]:has([data-testid="stExpanderIconSpinner"]),
+[data-testid="stExpander"]:has([data-testid="stExpanderIconCheck"]),
+[data-testid="stExpander"]:has([data-testid="stExpanderIconError"]) {
+    background: #F4F6FB;
+}
+/* 테두리 있는 카드(그래프/타겟 결과/취합 패널 등)는 모두 같은 모서리·테두리 */
+[data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"]) {
+    border-radius: 14px;
+    border-color: #E3E8F2;
+}
 
 /* ---------- 다운로드 버튼: 확인/카피 버튼(파랑)과 구분되는 보조 액션 톤 ---------- */
 [data-testid="stDownloadButton"] button {
@@ -228,7 +257,8 @@ _CHAT_CSS = """
 .hp-chat-row.hp-user { justify-content: flex-end; }
 .hp-chat-row.hp-assistant { justify-content: flex-start; }
 .hp-chat-bubble {
-    max-width: 70%;
+    width: fit-content;   /* 짧은 말은 말풍선이 글에 맞게, 긴 말은 카드/그래프와 같은 폭까지 */
+    max-width: 100%;
     padding: 11px 16px;
     border-radius: 18px;
     white-space: pre-wrap;
@@ -237,6 +267,7 @@ _CHAT_CSS = """
     font-size: 0.95rem;
 }
 .hp-chat-bubble.hp-user {
+    max-width: 80%;
     background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
     color: #ffffff;
     border-bottom-right-radius: 4px;
@@ -261,6 +292,7 @@ def inject_chat_css():
 def _bubble_html(role, text):
     css_role = "hp-user" if role == "user" else "hp-assistant"
     safe_text = html_lib.escape(text).replace("\n", "<br>")
+    safe_text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", safe_text)  # AI가 강조로 쓴 **굵게**가 별표 그대로 보이지 않게
     return f'<div class="hp-chat-row {css_role}"><div class="hp-chat-bubble {css_role}">{safe_text}</div></div>'
 
 

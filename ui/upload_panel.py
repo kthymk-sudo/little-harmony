@@ -23,7 +23,7 @@ def render_upload_panel():
         "콘텐츠 통계 (xlsx)", type="xlsx", accept_multiple_files=True, key="up_content"
     )
 
-    if st.button("DB에 반영", key="btn_upload_commit"):
+    if st.button("DB에 반영", key="btn_upload_commit", type="primary", icon=":material/database:", width="stretch"):
         if not history_files and not employee_files and not content_files:
             st.warning("업로드된 파일이 없습니다.")
             return

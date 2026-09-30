@@ -38,16 +38,16 @@ def _autosave():
 
 
 def _render_steps(steps, checks):
-    with st.expander(f"🧮 계산 과정 보기 ({len(steps)}단계)"):
+    with st.expander(f"계산 과정 보기 ({len(steps)}단계)", icon=":material/calculate:"):
         for s in steps:
             st.markdown(f"**{s['번호']}단계 · {s['설명']}**")
             st.code(s['code'], language='python')
             if s.get('error'):
-                st.caption(f"⚠️ 오류(다음 단계에서 고침): {s['error']}")
+                st.caption(f":material/warning: 오류(다음 단계에서 고침): {s['error']}")
             elif s.get('preview'):
                 st.text(s['preview'][:2000])
         if checks:
-            st.caption("🛡️ 답변 검증 기록 - 실행 결과에 없는 숫자나 지어낸 결과는 거부하고 다시 요청했어요")
+            st.caption(":material/verified_user: 답변 검증 기록 - 실행 결과에 없는 숫자나 지어낸 결과는 거부하고 다시 요청했어요")
             for c in checks:
                 st.caption(f"· {c}")
 
@@ -121,7 +121,7 @@ def _ask(user_text, feedback=False):
 def render_analysis_chat(profile_df, db_audience=None, db_content=None):
     inject_chat_css()
 
-    st.title("📊 시청 데이터 분석")
+    st.title(":material/analytics: 데이터 분석")
     st.caption("AI가 실제 데이터를 직접 계산하며 분석해요. 궁금한 걸 자유롭게 물어보고, 필요할 때 그래프로 만들어요.")
 
     if not st.session_state.analysis_messages:
@@ -145,13 +145,14 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
             fig = build_pivot_chart_figure(chart_spec)
         except Exception:  # 그래프 하나가 깨져도 대화 화면 전체가 멈추지 않게
             fig = None
-            st.caption("⚠️ 이 그래프는 그리지 못했어요. 그래프 종류를 바꿔서 다시 요청해 주세요.")
+            st.caption(":material/warning: 이 그래프는 그리지 못했어요. 그래프 종류를 바꿔서 다시 요청해 주세요.")
         if fig is not None:
-            st.plotly_chart(fig, width='stretch', key=f"analysis_chart_{i}")
-            table_df = pivot_table_df(chart_spec.get("data") or {})
-            if table_df is not None:
-                with st.expander("표로 보기"):
-                    st.dataframe(table_df, width='stretch')
+            with st.container(border=True):  # 그래프+표를 한 카드로 묶어 다른 카드(타겟 결과 등)와 같은 모양으로
+                st.plotly_chart(fig, width='stretch', key=f"analysis_chart_{i}")
+                table_df = pivot_table_df(chart_spec.get("data") or {})
+                if table_df is not None:
+                    with st.expander("표로 보기", icon=":material/table:"):
+                        st.dataframe(table_df, width='stretch')
         if turn.get("steps") or turn.get("checks"):
             _render_steps(turn.get("steps") or [], turn.get("checks") or [])
 

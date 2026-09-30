@@ -35,13 +35,13 @@ render_sidebar()
 
 # 대화 저장이 실패했으면(ui/*의 autosave가 표시) 한 번 알려준다 - 저장 직후 rerun되므로 여기서 띄운다
 if st.session_state.pop('save_failed', False):
-    st.toast("⚠️ 대화 저장에 실패했어요. 중요한 내용은 따로 복사해 두세요.")
+    st.toast("대화 저장에 실패했어요. 중요한 내용은 따로 복사해 두세요.", icon=":material/warning:")
 
 # 🌟 [속도 최적화] 데이터 존재 여부만 확인하는 가벼운 쿼리로 안내 화면을 먼저 분기한다
 # (데이터가 아무리 많이 쌓여 있어도 이 확인 자체는 항상 즉시 끝난다).
 if not has_history_data():
     st.title(SYSTEM_NAME)
-    st.warning("아직 적재된 시청 데이터가 없습니다. 왼쪽 사이드바의 '📂 데이터 업로드'에서 파일을 올려주세요.")
+    st.warning("아직 적재된 시청 데이터가 없습니다. 왼쪽 사이드바의 '데이터 업로드'에서 파일을 올려주세요.")
     st.stop()
 
 data_version = get_data_version()

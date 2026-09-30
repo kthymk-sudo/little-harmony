@@ -74,7 +74,8 @@ def render_sidebar():
                 st.rerun()
 
         st.divider()
-        st.caption("대화 기록")
+        with st.container(key="hp-side-label"):  # 이 제목만 작은 대문자 라벨 스타일(chat_styles.py)
+            st.caption("대화 기록")
 
         conv_list = list_conversations(feature=st.session_state.active_feature)
         active_conv_id = st.session_state[handler["conv_id_key"]]
@@ -107,7 +108,7 @@ def render_sidebar():
 
                 col_title, col_rename, col_delete = st.columns([4, 1, 1])
                 with col_title:
-                    label = ("🟢 " if is_active else "") + (row['title'] or handler["default_title"])
+                    label = (":blue[:material/fiber_manual_record:] " if is_active else "") + (row['title'] or handler["default_title"])
                     if st.button(label, key=f"conv_{row['id']}", width='stretch'):
                         if not is_active:
                             detail = load_conversation(row['id'])
@@ -115,11 +116,11 @@ def render_sidebar():
                                 handler["load"](detail)
                                 st.rerun()
                 with col_rename:
-                    if st.button("✏️", key=f"rename_{row['id']}"):
+                    if st.button(":material/edit:", key=f"rename_{row['id']}", help="이름 변경"):
                         st.session_state['renaming_conv_id'] = row['id']
                         st.rerun()
                 with col_delete:
-                    if st.button("🗑", key=f"del_{row['id']}"):
+                    if st.button(":material/delete:", key=f"del_{row['id']}", help="삭제"):
                         was_active = is_active
                         delete_conversation(row['id'])
                         if was_active:
@@ -130,10 +131,10 @@ def render_sidebar():
         # 기간이 분석 스펙("기간")에 담겨 그 집계에만 적용된다(7월 대비 8월처럼 기간을 넘나드는
         # 비교가 가능). 타겟팅은 적재된 전체 기간을 쓰고, 최근성은 대화 조건(최근시청일이후)으로 좁힌다.
         st.divider()
-        with st.expander("📂 데이터 업로드"):
+        with st.expander("데이터 업로드", icon=":material/upload_file:"):
             render_upload_panel()
 
-        with st.expander("⚙️ 시스템 정보"):
+        with st.expander("시스템 정보", icon=":material/info:"):
             try:
                 periods = get_loaded_periods()
             except Exception:
