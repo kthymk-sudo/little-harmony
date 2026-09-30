@@ -111,6 +111,18 @@ def parse_report_tree(report_text):
     return nodes
 
 
+def strip_tree_lines(report_text):
+    """답변에서 트리 줄(📌·▸·· 등으로 시작하는 줄)을 뺀 나머지 글(핵심 요약, 구성 메모, 설명 문장 등). 트리는 그림으로 따로 보여 주기 위해 쓴다."""
+    keep = []
+    for raw in report_text.splitlines():
+        s = raw.strip().lstrip("﻿")
+        if s and (s.startswith("📌") or s[0] in _ITEM_MARKERS):
+            continue
+        keep.append(raw)
+    text = "\n".join(keep).strip()
+    return re.sub(r"\n{3,}", "\n\n", text)
+
+
 def merge_report_trees(trees):
     """여러 SO의 트리([(depth, text), ...] 목록)를 한 트리로 합친다. 각 트리의 📌 중심이 나란히 놓이고,
     build_emm_from_nodes가 그 위에 공통 중심토픽을 만들어 SO마다 1단계 가지가 된다."""
@@ -298,4 +310,7 @@ if __name__ == "__main__":
     a, b = parse_report_tree("📌 대전 · 9월 4주차\n  ▸ 실적\n    · 14회\x0b"), parse_report_tree("📌 광주 · 9월 4주차\n  ▸ 실적")
     merged = texts_of(build_emm_from_nodes(merge_report_trees([a, b]), "9월 4주차 SO별 활동 보고 취합"))
     assert merged == ["9월 4주차 SO별 활동 보고 취합", "대전 · 9월 4주차", "실적", "14회", "광주 · 9월 4주차", "실적"], merged
+    # 트리 줄을 뺀 나머지 글(핵심 요약·구성 메모)만 남긴다
+    assert strip_tree_lines("📌 중심\n  ▸ 가\n    · 나\n\n핵심 요약: 성과가 좋았어요.\n\n구성 메모: 묶었어요.") == "핵심 요약: 성과가 좋았어요.\n\n구성 메모: 묶었어요."
+    assert strip_tree_lines("📌 중심\n  ▸ 가") == ""
     print("emm_export self-check OK")

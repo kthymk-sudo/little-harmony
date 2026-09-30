@@ -269,13 +269,13 @@ _CHAT_CSS = """
 /* ---------- 알마인드 미리보기(SVG) ---------- */
 .hp-mindmap {
     overflow: auto;
-    max-height: 520px;
+    max-height: 560px;
     padding: 10px;
     border: 1px solid #E3E8F2;
     border-radius: 12px;
     background: #FBFDF6;
 }
-.hp-mindmap svg { display: block; }
+.hp-mindmap svg { display: block; max-width: 100%; height: auto; }   /* 넓은 그림은 화면 폭에 맞춰 줄여 한눈에 */
 
 /* ---------- 채팅 말풍선 ---------- */
 .hp-chat-row { display: flex; margin: 10px 0; animation: hp-fade-in 0.25s ease; }

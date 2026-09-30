@@ -19,7 +19,7 @@ from database.db_manager import save_simple_conversation
 from ui import job_runner
 from utils.mindmap_svg import mindmap_svg
 from ui.target_card import autosave_simple
-from utils.emm_export import build_emm_from_nodes, merge_report_trees, parse_report_tree
+from utils.emm_export import build_emm_from_nodes, merge_report_trees, parse_report_tree, strip_tree_lines
 
 
 def _safe_filename(text):
@@ -44,15 +44,19 @@ def _excluded_materials(messages):
     return [m['index'] for m in collect_materials(messages) if st.session_state.get(_material_key(m['index'])) is False]
 
 
+_DEPTHS = {"한눈에": 2, "3단계": 3, "전체": 9}
+
+
 def _render_merge_panel(messages):
-    """올린 자료(정리된 SO 보고서, 분석 자료, 첨부 자료)를 한 줄로 보여주고, 최종 알마인드 파일을 딱 하나 내려받게 한다.
-    대화로 만든 취합안(draft)이 있으면 그것을, 없으면 SO 보고서를 가지 하나씩 묶은 기본 취합을 쓴다(같은 SO를 다시 올렸으면 나중 것).
-    자료를 빼는 체크박스는 '자료 관리'를 열어야 보인다(평소에는 화면을 복잡하게 하지 않는다)."""
+    """🌟 [현재 알마인드] 올린 자료를 한 줄로 보여주고, 지금 알마인드가 어떤 구조인지 그림으로 한눈에 보여주며 최종 파일을 딱 하나 내려받게 한다.
+    대화로 만든 취합안이 있으면 그것을, 없으면 SO 보고서를 가지 하나씩 묶은 기본 취합을 그린다(취합안을 만들면 그것이 최종본이 된다).
+    구성·내용을 고치는 일은 전부 대화로 하므로 "어느 안을 받을지" 고르는 컨트롤은 없다. 자료를 빼는 체크박스는 '자료 관리'에만 있다."""
     reports, materials = collect_so_reports(messages), collect_materials(messages)
     if not reports and not materials:
         return
+    conv = st.session_state.get('report_current_conversation_id')
     with st.container(border=True):
-        st.markdown("**:material/inventory_2: 올린 자료 · 최종 알마인드**")
+        st.markdown("**:material/account_tree: 현재 알마인드**")
         st.caption(f"자료 {len(reports) + len(materials)}개: " + " · ".join([r['SO'] for r in reports] + [m['제목'] for m in materials]))
 
         with st.expander("자료 관리", icon=":material/tune:"):
@@ -64,48 +68,57 @@ def _render_merge_panel(messages):
             picked = [r for r in reports if st.checkbox(_label(r), value=True, key=_use_key(r['SO']))]
             for m in materials:
                 st.checkbox(f"{m.get('종류', '분석')} 자료 · {m['제목']}", value=True, key=_material_key(m['index']))
-            st.caption("체크를 풀면 그 자료는 이후 취합·요약에서 빠져요. 분석·첨부 자료는 대화로 취합안을 만들 때 반영돼요(SO별 기본 취합에는 들어가지 않아요).")
+            st.caption("체크를 풀면 그 자료는 이후 취합·요약에서 빠져요. 분석·첨부 자료는 대화로 취합안을 만들 때 반영돼요.")
             if any(r['SO'].startswith("SO 미확인") for r in reports):
                 st.caption(":material/warning: SO를 알 수 없는 보고서가 있어요. 다시 올리면서 'OO 보고서야'라고 SO를 알려주세요.")
 
         draft = latest_draft(messages)
-        use_draft = False
         if draft:
-            choice = st.radio("최종 알마인드로 받을 안", ["대화로 만든 취합안 (가장 최근)", "SO별 기본 취합 (SO마다 가지 하나)"],
-                              key=f"final_choice_{st.session_state.get('report_current_conversation_id')}")
-            use_draft = choice.startswith("대화로")
-            if use_draft and draft_is_stale(messages):
-                st.warning("취합안을 만든 뒤 자료가 새로 담기거나 교체됐어요. 그 내용은 이 취합안에 반영되지 않았으니, "
+            if draft_is_stale(messages):
+                st.warning("취합안을 만든 뒤 자료가 새로 담기거나 교체됐어요. 그 내용은 이 알마인드에 반영되지 않았으니, "
                            "대화로 '취합안 다시 만들어줘'라고 요청해 주세요.", icon=":material/warning:")
-        if use_draft:
             nodes = parse_report_tree(draft['text'])
-            data, title = build_emm_from_nodes(nodes, nodes[0][1]), nodes[0][1]
-            st.caption("대화로 만든 취합안이에요. 고치고 싶으면 대화로 요청하세요(예: '3번 키워드 빼줘', '요약해서 다시 만들어줘').")
+            title = nodes[0][1]
         elif len(picked) >= 2:
             key_suffix = "_".join(r['SO'] for r in picked)
             title = st.text_input("취합본 제목 (알마인드 중심 토픽)", value=merged_title(picked), key=f"merge_title_{key_suffix}").strip() or merged_title(picked)
-            data = build_emm_from_nodes(merge_report_trees([r['nodes'] for r in picked]), title)
+            nodes = merge_report_trees([r['nodes'] for r in picked])
+        elif picked:
+            nodes = picked[0]['nodes']
+            title = nodes[0][1]
         else:
-            st.caption("대화로 '종합해서 요약해줘', '취합안 만들어줘'라고 하면 최종 알마인드를 받을 수 있어요.")
+            st.caption("'자료 관리'에서 자료를 하나 이상 선택하거나, 대화로 '취합안 만들어줘'라고 해 주세요.")
             return
-        st.download_button("최종 알마인드 다운로드 (.emm)", icon=":material/download:", data=data, file_name=f"{_safe_filename(title)}.emm",
-                           mime="application/octet-stream", key="emm_final")
+
+        view = st.segmented_control("보기", list(_DEPTHS), default="한눈에", key=f"map_view_{conv}", label_visibility="collapsed") or "한눈에"
+        svg, hidden = mindmap_svg(nodes, title=title, max_depth=_DEPTHS[view])
+        st.markdown(f'<div class="hp-mindmap">{svg}</div>', unsafe_allow_html=True)
+        st.caption(f"{len(nodes)}개 항목 · " + (f"'{view}'로 그려서 {hidden}개 항목이 숨겨져 있어요. 위에서 '3단계'나 '전체'를 눌러 보세요. " if hidden else "모든 항목을 보여줘요. ")
+                   + "고치고 싶으면 대화로 말씀해 주세요(예: 'SO가 가장 큰 가지로', '요약해서 다시 만들어줘', '조회수를 맨 위로').")
+        with st.expander("글로 보기", icon=":material/notes:"):
+            st.code("\n".join("  " * d + t for d, t in nodes), language=None)
+        st.download_button("최종 알마인드 다운로드 (.emm)", icon=":material/download:", data=build_emm_from_nodes(nodes, title),
+                           file_name=f"{_safe_filename(title)}.emm", mime="application/octet-stream", key="emm_final")
 
 
 def _has_tree(turn):
     return turn["role"] == "assistant" and len(parse_report_tree(turn["text"])) >= 3
 
 
-def _render_preview(text, expanded):
-    """🌟 [알마인드 미리보기] 트리 답변을 알마인드 가지형처럼 그림으로 보여준다(파일을 열어 보지 않고도 모양을 알 수 있게)."""
+def _tree_done_sentence(turn):
+    """트리 답변에 붙은 글이 없을 때 말풍선에 보여줄 한 줄."""
+    nodes = parse_report_tree(turn["text"])
+    what = "취합안을 만들었어요" if turn.get("draft") else f"'{nodes[0][1]}' 정리를 마쳤어요"
+    return f"{what} ({len(nodes)}개 항목). 구조는 아래 '현재 알마인드'에서 확인해 주세요."
+
+
+def _render_preview(text):
+    """🌟 [알마인드 미리보기] 의논 중 보여준 예시 트리를 알마인드 가지형 그림으로 보여준다(글이 아니라 모양으로 볼 수 있게)."""
     nodes = parse_report_tree(text)
-    svg, hidden = mindmap_svg(nodes)
-    if not svg:
-        return
-    with st.expander(f"알마인드 미리보기 ({len(nodes)}개 항목)", icon=":material/account_tree:", expanded=expanded):
+    svg, _ = mindmap_svg(nodes, max_depth=3)
+    if svg:
         st.markdown(f'<div class="hp-mindmap">{svg}</div>', unsafe_allow_html=True)
-        st.caption("알마인드에서 열었을 때의 모양을 비슷하게 그린 그림이에요(글꼴·간격은 조금 달라요)."
-                   + (f" 3단계까지만 그렸고, 더 깊은 {hidden}개 항목은 파일에 들어 있어요." if hidden else ""))
+        st.caption("예시 그림이에요. 마음에 들면 '이 구성으로 취합안 만들어줘'라고 말씀해 주세요.")
 
 
 def render_report_chat(profile_df, db_audience=None, db_content=None):
@@ -125,14 +138,19 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
         st.session_state.report_greet_stream_pending = False
 
     last_idx = len(st.session_state.report_messages) - 1
-    last_tree_idx = next((i for i in range(last_idx, -1, -1) if _has_tree(st.session_state.report_messages[i])), -1)
+    last_draft_idx = next((i for i in range(last_idx, -1, -1) if st.session_state.report_messages[i].get("draft")), -1)
     for i, turn in enumerate(st.session_state.report_messages):
         should_animate = (i == last_idx and turn["role"] == "assistant" and st.session_state.get('report_stream_next'))
-        render_message(turn["role"], turn["text"], animate=should_animate)
+        shown, example_tree = turn["text"], False
+        if _has_tree(turn):
+            # 🌟 긴 트리 글은 말풍선에 늘어놓지 않는다(스크롤 피로) - 구조는 아래 '현재 알마인드' 그림으로, 말풍선에는 핵심 요약·메모 같은 짧은 글만
+            shown = strip_tree_lines(turn["text"]) or _tree_done_sentence(turn)
+            example_tree = not (turn.get("draft") or turn.get("report_meta"))   # 의논 중 보여준 예시 트리는 그 자리에서 그림으로
+        render_message(turn["role"], shown, animate=should_animate)
         if should_animate:
             st.session_state.report_stream_next = False
-        if _has_tree(turn):   # 가장 최근 트리는 펼쳐서, 지난 것은 접어서 보여준다
-            _render_preview(turn["text"], expanded=(i == last_tree_idx))
+        if example_tree:
+            _render_preview(turn["text"])
         render_chart_card(turn.get("chart"), f"report_chart_{i}")
 
         if turn.get("missing"):  # 대조에서 다시 정리해도 남은 문제 - 숨기지 않고 알린다
@@ -146,8 +164,8 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
             with st.expander("원문 대조 기록", icon=":material/verified_user:"):
                 for c in turn["checks"]:
                     st.caption(f"· {c}")
-        if turn.get("draft"):
-            st.caption(":material/edit_note: 취합안 미리보기예요. 마음에 들면 아래 패널에서 최종 알마인드로 받으세요. 고칠 부분은 대화로 말씀해 주세요.")
+        if i == last_draft_idx:
+            st.caption(":material/account_tree: 취합안의 구조는 아래 '현재 알마인드'에서 볼 수 있어요. 고칠 부분은 대화로 말씀해 주세요.")
 
     _render_merge_panel(st.session_state.report_messages)
 
