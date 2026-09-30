@@ -287,13 +287,6 @@ def collect_so_reports(messages):
     return sorted(latest.values(), key=lambda r: _so_sort_key(r['SO']))
 
 
-def region_status(reports):
-    """기본 권역(config.SO_REGIONS) 8곳별 제출 여부. 반환: ([(권역, 들어온 SO 이름 또는 None)], [권역에 안 맞는 SO 이름])."""
-    by_region = {r['SO']: r['SO'] for r in reports if region_of(r['SO']) == r['SO']}
-    status = [(region, by_region.get(region)) for region in _REGION_ORDER]
-    return status, [r['SO'] for r in reports if r['SO'] not in by_region]
-
-
 def latest_draft(messages):
     """가장 최근 취합안 답변(없으면 None)."""
     return next((m for m in reversed(messages) if m.get('draft') and m.get('role') == 'assistant'), None)
@@ -351,8 +344,6 @@ if __name__ == "__main__":
                                   _msg("", "9월 4주차", "\n  ▸ A"), _msg("", "9월 4주차", "\n  ▸ B"), _msg("수성", "9월 4주차")])
     assert [r['SO'] for r in reports] == ["대전", "광주", "대구", "SO 미확인 1", "SO 미확인 2", "본사"], [r['SO'] for r in reports]
     assert [r['교체'] for r in reports][:2] == [0, 1] and reports[1]['원본이름'] == "광주동부"
-    status, extra = region_status(reports)
-    assert [s for _, s in status] == ["대전", None, None, "광주", None, None, None, "대구"] and extra == ["SO 미확인 1", "SO 미확인 2", "본사"], (status, extra)
     assert region_of("㈜씨엠비동대전방송") == "대전" and region_of("영등포 SO") == "영등포" and region_of("본사") is None
 
     # 이전 대화 줄이기: 긴 원문·SO 정리 트리·옛 취합안은 한 줄로, 마지막 취합안은 그대로

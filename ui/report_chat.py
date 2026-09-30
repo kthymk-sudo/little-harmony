@@ -9,7 +9,7 @@ import re
 
 import streamlit as st
 from services.report_service import (
-    process_report_turn, read_attachments, collect_so_reports, collect_materials, merged_title, region_status, latest_draft,
+    process_report_turn, read_attachments, collect_so_reports, collect_materials, merged_title, latest_draft,
     draft_is_stale,
 )
 from utils.file_reader import FILE_TYPES
@@ -42,32 +42,28 @@ def _excluded_materials(messages):
 
 
 def _render_merge_panel(messages):
-    """정리된 SO 현황을 보여주고, 최종 알마인드 파일을 딱 하나 내려받게 한다.
-    대화로 만든 취합안(draft)이 있으면 그것을, 없으면 SO별로 가지 하나씩 묶은 기본 취합을 쓴다(같은 SO를 다시 붙여넣었으면 나중 것)."""
+    """올린 자료(정리된 SO 보고서, 분석 자료, 첨부 자료)를 한 줄로 보여주고, 최종 알마인드 파일을 딱 하나 내려받게 한다.
+    대화로 만든 취합안(draft)이 있으면 그것을, 없으면 SO 보고서를 가지 하나씩 묶은 기본 취합을 쓴다(같은 SO를 다시 올렸으면 나중 것).
+    자료를 빼는 체크박스는 '자료 관리'를 열어야 보인다(평소에는 화면을 복잡하게 하지 않는다)."""
     reports, materials = collect_so_reports(messages), collect_materials(messages)
     if not reports and not materials:
         return
-    status, extra = region_status(reports)
     with st.container(border=True):
-        st.markdown("**:material/inventory_2: SO별 취합 현황 · 최종 알마인드**")
-        st.markdown("  ".join(f":green[:material/check_circle:] {region}" if so else f":gray[:material/radio_button_unchecked:] {region}"
-                             for region, so in status)
-                    + (f"  :blue[:material/add_circle:] {', '.join(extra)}" if extra else ""))
-        st.caption(f"{len(reports)}개 SO 정리됨 (기본 권역 {sum(1 for _, so in status if so)}/{len(status)}). "
-                   "빈 원은 아직 붙여넣지 않은 권역이에요. 다른 SO 보고서를 이어서 붙여넣으면 여기에 쌓여요.")
-        def _label(r):
-            note = f" · 원문 표기 '{r['원본이름']}'" if r['원본이름'] != r['SO'] else ""
-            note += " · 다시 붙여넣어 최신본으로 교체됨" if r['교체'] else ""
-            return f"{r['SO']} ({len(r['nodes'])}개 항목){note}"
+        st.markdown("**:material/inventory_2: 올린 자료 · 최종 알마인드**")
+        st.caption(f"자료 {len(reports) + len(materials)}개: " + " · ".join([r['SO'] for r in reports] + [m['제목'] for m in materials]))
 
-        picked = [r for r in reports if st.checkbox(_label(r), value=True, key=_use_key(r['SO']))]
-        if any(r['SO'].startswith("SO 미확인") for r in reports):
-            st.caption(":material/warning: SO를 알 수 없는 보고서가 있어요. 그 보고서를 다시 붙여넣으며 'OO 보고서야'라고 SO를 알려주세요.")
+        with st.expander("자료 관리", icon=":material/tune:"):
+            def _label(r):
+                note = f" · 원문 표기 '{r['원본이름']}'" if r['원본이름'] != r['SO'] else ""
+                note += " · 다시 올려 최신본으로 교체됨" if r['교체'] else ""
+                return f"{r['SO']} ({len(r['nodes'])}개 항목){note}"
 
-        if materials:
+            picked = [r for r in reports if st.checkbox(_label(r), value=True, key=_use_key(r['SO']))]
             for m in materials:
                 st.checkbox(f"{m.get('종류', '분석')} 자료 · {m['제목']}", value=True, key=_material_key(m['index']))
-            st.caption("분석·첨부 자료는 대화로 취합안을 만들 때 반영돼요(\"이번 취합안에 이 자료도 넣어줘\"). SO별 기본 취합에는 들어가지 않아요.")
+            st.caption("체크를 풀면 그 자료는 이후 취합·요약에서 빠져요. 분석·첨부 자료는 대화로 취합안을 만들 때 반영돼요(SO별 기본 취합에는 들어가지 않아요).")
+            if any(r['SO'].startswith("SO 미확인") for r in reports):
+                st.caption(":material/warning: SO를 알 수 없는 보고서가 있어요. 다시 올리면서 'OO 보고서야'라고 SO를 알려주세요.")
 
         draft = latest_draft(messages)
         use_draft = False
@@ -76,18 +72,18 @@ def _render_merge_panel(messages):
                               key=f"final_choice_{st.session_state.get('report_current_conversation_id')}")
             use_draft = choice.startswith("대화로")
             if use_draft and draft_is_stale(messages):
-                st.warning("취합안을 만든 뒤 SO 보고서나 분석 자료가 새로 담기거나 교체됐어요. 그 내용은 이 취합안에 반영되지 않았으니, "
+                st.warning("취합안을 만든 뒤 자료가 새로 담기거나 교체됐어요. 그 내용은 이 취합안에 반영되지 않았으니, "
                            "대화로 '취합안 다시 만들어줘'라고 요청해 주세요.", icon=":material/warning:")
         if use_draft:
             nodes = parse_report_tree(draft['text'])
             data, title = build_emm_from_nodes(nodes, nodes[0][1]), nodes[0][1]
-            st.caption("의논 끝에 만든 취합안이에요. 고치고 싶으면 대화로 요청하세요(예: '3번 키워드 빼줘').")
+            st.caption("대화로 만든 취합안이에요. 고치고 싶으면 대화로 요청하세요(예: '3번 키워드 빼줘', '요약해서 다시 만들어줘').")
         elif len(picked) >= 2:
             key_suffix = "_".join(r['SO'] for r in picked)
             title = st.text_input("취합본 제목 (알마인드 중심 토픽)", value=merged_title(picked), key=f"merge_title_{key_suffix}").strip() or merged_title(picked)
             data = build_emm_from_nodes(merge_report_trees([r['nodes'] for r in picked]), title)
         else:
-            st.caption("최종 파일은 2개 이상 SO를 선택하거나, 대화로 취합안을 만들면 받을 수 있어요.")
+            st.caption("대화로 '종합해서 요약해줘', '취합안 만들어줘'라고 하면 최종 알마인드를 받을 수 있어요.")
             return
         st.download_button("최종 알마인드 다운로드 (.emm)", icon=":material/download:", data=data, file_name=f"{_safe_filename(title)}.emm",
                            mime="application/octet-stream", key="emm_final")
@@ -97,15 +93,14 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
     inject_chat_css()
 
     st.title(":material/description: 보고서")
-    st.caption("SO별 활동 보고서를 하나씩 붙여넣어 쌓고, 대화로 취합 방향을 정해 최종 알마인드 한 개로 받아요.")
+    st.caption("글, 사진, 파일을 올리면 AI가 내용을 분석해 취합·요약하고, 대화로 구성을 다듬어 최종 알마인드 한 개로 받아요.")
 
     if not st.session_state.report_messages:
         greeting = (
-            "안녕하세요! SO 활동 보고서를 하나씩 붙여넣어주세요. 원문의 내용(링크·수치·목록)은 그대로 두고 번호와 들여쓰기를 "
-            "따라 트리로 정리해드릴게요. 예: '대전 SO 9월 4주차 활동 보고서야. 정리해줘' + 원문. "
-            "SO 보고서가 쌓이면 '짬짬반장이랑 조회수 위주로 묶으면 어때?'처럼 취합 방향을 저와 의논할 수 있고, "
-            "'이 키워드로 취합안 만들어줘'라고 하시면 예시를 보며 다듬은 뒤 최종 알마인드 파일 한 개로 받으실 수 있어요. "
-            "글을 붙여넣는 대신 알마인드·엑셀·워드·한글·CSV·텍스트·사진·PDF 파일을 첨부해도 내용을 읽어서 같은 방식으로 정리해드려요."
+            "안녕하세요! 활동 보고서 글을 붙여넣거나, 알마인드·엑셀·워드·한글·CSV·텍스트·사진·PDF 파일을 올려 주세요. "
+            "올린 자료를 읽고 트리로 정리해 두었다가, '올린 자료를 종합해서 요약해줘', '중복되는 건 묶어서 한눈에 보게 취합해줘', "
+            "'짬짬반장이랑 조회수 위주로 묶으면 어때?'처럼 말씀하시면 분석해서 취합·요약해 드려요. "
+            "예시를 보며 구성을 대화로 다듬은 뒤 최종 알마인드 파일 한 개로 받으실 수 있어요. 원문의 링크·수치는 그대로 지키고, 자료를 추가하면 이어서 반영해요."
         )
         render_message("assistant", greeting, animate=st.session_state.get('report_greet_stream_pending', False))
         st.session_state.report_greet_stream_pending = False
