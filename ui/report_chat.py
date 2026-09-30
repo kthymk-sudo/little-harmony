@@ -8,10 +8,10 @@
 import re
 
 import streamlit as st
-from database.db_manager import save_conversation, make_conversation_title
 from services.report_service import process_report_turn, collect_so_reports, merged_title, region_status, latest_draft, draft_is_stale
-from ui.chart_render import build_pivot_chart_figure, pivot_table_df
+from ui.chart_render import render_chart_card
 from ui.chat_styles import inject_chat_css, render_message
+from ui.target_card import autosave_simple
 from utils.emm_export import build_emm_from_nodes, merge_report_trees, parse_report_tree
 
 
@@ -75,18 +75,6 @@ def _render_merge_panel(messages):
                            mime="application/octet-stream", key="emm_final")
 
 
-def _autosave():
-    first_user_text = next((m['text'] for m in st.session_state.report_messages if m['role'] == 'user'), "")
-    if not save_conversation(
-        conv_id=st.session_state.report_current_conversation_id,
-        title=make_conversation_title(first_user_text, feature='report'),
-        phase='', messages=st.session_state.report_messages,
-        conditions={}, stats={}, member_ids=[], reasoning="", push_copy="",
-        feature='report',
-    ):
-        st.session_state.save_failed = True  # main.py가 다음 화면에서 경고를 띄운다
-
-
 def render_report_chat(profile_df, db_audience=None, db_content=None):
     inject_chat_css()
 
@@ -109,19 +97,7 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
         render_message(turn["role"], turn["text"], animate=should_animate)
         if should_animate:
             st.session_state.report_stream_next = False
-        chart_spec = turn.get("chart")
-        try:
-            fig = build_pivot_chart_figure(chart_spec)
-        except Exception:  # 그래프 하나가 깨져도 대화 화면 전체가 멈추지 않게
-            fig = None
-            st.caption(":material/warning: 이 그래프는 그리지 못했어요.")
-        if fig is not None:
-            with st.container(border=True):
-                st.plotly_chart(fig, width='stretch', key=f"report_chart_{i}")
-                table_df = pivot_table_df(chart_spec.get("data") or {})
-                if table_df is not None:
-                    with st.expander("표로 보기", icon=":material/table:"):
-                        st.dataframe(table_df, width='stretch')
+        render_chart_card(turn.get("chart"), f"report_chart_{i}")
 
         if turn.get("missing"):  # 대조에서 다시 정리해도 남은 문제 - 숨기지 않고 알린다
             if turn.get("missing_kind") == "취합안":
@@ -148,7 +124,7 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
             )
             st.session_state.report_messages = new_messages
         st.session_state.report_stream_next = True
-        _autosave()
+        autosave_simple('report')
         st.rerun()
 
     user_text = st.chat_input("SO 활동 보고서를 붙여넣어주세요")

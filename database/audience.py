@@ -7,13 +7,12 @@ import re
 import numpy as np
 import pandas as pd
 import streamlit as st
-from config import ACTIVE_SEGMENT_DAYS, DORMANT_SEGMENT_DAYS, SO_REGIONS
+from config import ACTIVE_SEGMENT_DAYS, DORMANT_SEGMENT_DAYS, SO_REGIONS, SO_TO_REGION
 
 # 🌟 [버그 수정 - 조건 표기 불일치] 데이터의 성별 값은 "남자"/"여자"인데, AI나 실무자가
 # "여", "여성"처럼 쓰면 정확 일치 비교라 대상자가 0명이 됐다. 흔한 표기를 데이터 값으로 맞춘다.
 _GENDER_ALIASES = {'여': '여자', '여성': '여자', 'f': '여자', 'female': '여자',
                    '남': '남자', '남성': '남자', 'm': '남자', 'male': '남자'}
-_SO_TO_REGION = {so: region for region, sos in SO_REGIONS.items() for so in sos}
 
 
 def _normalize_genders(values):
@@ -768,7 +767,7 @@ def _groupable_series(df, group_field):
         band = (age_num // 10 * 10).astype('Int64').astype(str) + '대'
         return band.where(age_num.notna())
     if group_field == 'SO' and '시청자SO' in df.columns:  # SO별은 기본적으로 8개 권역으로 묶어서
-        return df['시청자SO'].map(lambda v: _SO_TO_REGION.get(v, v))
+        return df['시청자SO'].map(lambda v: SO_TO_REGION.get(v, v))
     col = _GROUPABLE_FIELD_COLUMNS.get(group_field)
     if col is None or col not in df.columns:
         return None

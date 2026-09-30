@@ -42,6 +42,8 @@ SO_REGIONS = {
     '동대문': ['㈜씨엠비동대문방송'],
     '대구': ['㈜씨엠비대구방송', '㈜씨엠비수성방송'],
 }
+SO_TO_REGION = {so: region for region, sos in SO_REGIONS.items() for so in sos}
+REGION_ORDER = list(SO_REGIONS)
 
 # 🌟 [지표 정의집] 분석에서 쓰는 지표의 정의를 한 곳에 모은다. AI는 항상 이 정의로 계산하고 답변에 밝힌다
 # (예전에는 정의가 프롬프트 여기저기에 흩어져 있어서 "신규 시청자"가 답변마다 다르게 계산됐다 - 647명/714명).

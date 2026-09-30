@@ -16,6 +16,7 @@
 # ============================================================
 import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
 from plotly.subplots import make_subplots
 from services.analysis_service import normalize_pivot_result, describe_pivot
 
@@ -211,3 +212,20 @@ def build_pivot_chart_figure(chart_spec):
     fig.update_yaxes(gridcolor=_GRID, linecolor=_AXIS, zeroline=False, automargin=True)  # 긴 항목명이 잘리지 않게
     fig.update_traces(cliponaxis=False, selector=dict(type='bar'))
     return fig
+
+
+def render_chart_card(chart_spec, key):
+    """chart_spec이 있으면 그래프+표를 한 카드로 그린다(분석/보고서 탭 공용). 그래프 하나가 깨져도 화면 전체가 멈추지 않게 한다."""
+    try:
+        fig = build_pivot_chart_figure(chart_spec)
+    except Exception:
+        st.caption(":material/warning: 이 그래프는 그리지 못했어요.")
+        return
+    if fig is None:
+        return
+    with st.container(border=True):
+        st.plotly_chart(fig, width='stretch', key=key)
+        table_df = pivot_table_df(chart_spec.get("data") or {})
+        if table_df is not None:
+            with st.expander("표로 보기", icon=":material/table:"):
+                st.dataframe(table_df, width='stretch')

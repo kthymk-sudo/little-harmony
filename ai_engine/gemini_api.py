@@ -92,6 +92,16 @@ def _discover_target_model():
     return target_model
 
 
+def _switch_model(target_model, prompt, temperature):
+    """이 모델을 소진으로 표시하고 다른 모델로 다시 호출한다(한도 초과·서버 과부하·무응답 공통). 바꿀 모델이 없으면 None."""
+    _mark_exhausted(target_model)
+    _discover_target_model.clear()
+    new_target_model = _discover_target_model()
+    if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
+        return _call_gemini_api(prompt, temperature)
+    return None
+
+
 def _call_gemini_api(prompt, temperature=0.55):
     """Google Gemini API 호출, 예외 처리, Timeout, 재시도를 모두 담당하는 코어 함수."""
     if GEMINI_API_KEY == "여기에_발급받으신_GEMINI_API_KEY를_붙여넣으세요" or not GEMINI_API_KEY:
@@ -104,14 +114,11 @@ def _call_gemini_api(prompt, temperature=0.55):
         target_model = _discover_target_model()
         payload = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"temperature": temperature}}
 
-        # 🌟 [속도 최적화] 구글 서버가 아플 때 너무 오래 기다리지 않도록 재시도 횟수를 2회로 확 줄입니다.
-        max_retries = 2
-        max_retries_5xx = 2
-
-        for attempt in range(max(max_retries, max_retries_5xx)):
+        # 🌟 [속도 최적화] 구글 서버가 아플 때 너무 오래 기다리지 않도록 재시도는 총 2번, 타임아웃은 20초.
+        for attempt in range(2):
+            first_try = attempt == 0
             url_generate = f"https://generativelanguage.googleapis.com/v1beta/{target_model}:generateContent?key={GEMINI_API_KEY}"
             try:
-                # 🌟 타임아웃도 30초에서 20초로 줄여서 무한정 멈춰있는 현상을 방지합니다.
                 res_gen = _http_session.post(url_generate, headers={"Content-Type": "application/json"}, json=payload, timeout=20)
 
                 if res_gen.status_code == 200:
@@ -121,7 +128,7 @@ def _call_gemini_api(prompt, temperature=0.55):
                         return "⚠️ 답변을 생성하지 못했습니다(안전 필터에 의해 차단됐을 수 있어요). 표현을 조금 바꿔 다시 시도해주세요."
 
                 elif res_gen.status_code == 429:
-                    if attempt < max_retries - 1:
+                    if first_try:
                         retry_after = res_gen.headers.get("Retry-After")
                         try:
                             wait_s = float(retry_after) if retry_after else (2 ** attempt) + 1
@@ -129,37 +136,25 @@ def _call_gemini_api(prompt, temperature=0.55):
                             wait_s = (2 ** attempt) + 1
                         time.sleep(min(wait_s, 20))
                         continue
-
-                    _mark_exhausted(target_model)
-                    _discover_target_model.clear()
-
-                    new_target_model = _discover_target_model()
-                    if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
-                        return _call_gemini_api(prompt, temperature)
-
-                    return (
+                    switched = _switch_model(target_model, prompt, temperature)
+                    return switched if switched is not None else (
                         "⚠️ [모든 AI 모델 한도 초과] 현재 사용 가능한 모든 AI 모델의 일일 한도를 모두 소진했습니다. "
                         "내일 다시 시도하시거나, Google AI Studio에서 결제 설정을 확인해주세요."
                     )
 
                 elif res_gen.status_code in [500, 503]:
-                    if attempt < max_retries_5xx - 1:
-                        time.sleep(2) # 대기 시간을 짧게 고정합니다.
+                    if first_try:
+                        time.sleep(2)
                         continue
-
-                    # 🌟 [503 서버 과부하 우회 추가!] 구글 서버가 뻗었을 때도 즉시 다른 모델로 갈아탑니다.
-                    _mark_exhausted(target_model)
-                    _discover_target_model.clear()
-
-                    new_target_model = _discover_target_model()
-                    if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
-                        return _call_gemini_api(prompt, temperature)
-
-                    return f"⚠️ [서버 과부하] 구글 AI 서버가 혼잡하여 다른 모델로 우회하려 했으나 모두 실패했습니다. (상태코드: {res_gen.status_code})"
+                    # 🌟 [503 서버 과부하 우회] 구글 서버가 뻗었을 때도 즉시 다른 모델로 갈아탑니다.
+                    switched = _switch_model(target_model, prompt, temperature)
+                    return switched if switched is not None else (
+                        f"⚠️ [서버 과부하] 구글 AI 서버가 혼잡하여 다른 모델로 우회하려 했으나 모두 실패했습니다. (상태코드: {res_gen.status_code})"
+                    )
 
                 elif res_gen.status_code == 404:
                     _discover_target_model.clear()
-                    if target_model != _LATEST_FLASH_ALIAS and attempt < max_retries - 1:
+                    if target_model != _LATEST_FLASH_ALIAS and first_try:
                         target_model = _LATEST_FLASH_ALIAS
                         continue
                     return "⚠️ [모델 오류] 사용하려던 AI 모델을 찾을 수 없어 안전 모델로 자동 재시도 중 실패했습니다."
@@ -168,19 +163,12 @@ def _call_gemini_api(prompt, temperature=0.55):
                     return f"⚠️ API 요청 거부 ({res_gen.status_code}): {res_gen.text}"
 
             except requests.exceptions.RequestException as req_e:
-                if attempt < max_retries - 1:
+                if first_try:
                     time.sleep(2)
                     continue
-
-                # 🌟 [타임아웃 무응답 우회 추가!] 응답이 너무 오래 걸려도 버리고 다른 모델로 갈아탑니다.
-                _mark_exhausted(target_model)
-                _discover_target_model.clear()
-
-                new_target_model = _discover_target_model()
-                if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
-                    return _call_gemini_api(prompt, temperature)
-
-                return f"⚠️ 네트워크 통신 오류(Timeout 등)가 지속되어 중지합니다: {str(req_e)}"
+                # 🌟 [타임아웃 무응답 우회] 응답이 너무 오래 걸려도 버리고 다른 모델로 갈아탑니다.
+                switched = _switch_model(target_model, prompt, temperature)
+                return switched if switched is not None else f"⚠️ 네트워크 통신 오류(Timeout 등)가 지속되어 중지합니다: {str(req_e)}"
 
     except Exception as e:
         return f"⚠️ 시스템 통신 중 치명적 오류 발생: {str(e)}"
@@ -222,9 +210,6 @@ def generate_ai_push_copy(target_profile_str, reasoning_str, extra_request_str="
     else:
         prompt = get_push_prompt(target_profile_str, reasoning_str, extra_request_str)
     return _call_gemini_api(prompt, temperature=0.7)
-
-def get_current_model_label():
-    return _discover_target_model().replace("models/", "")
 
 def generate_segment_insight_reply(question_str, conditions_str, insight_stats_str):
     prompt = get_segment_insight_prompt(question_str, conditions_str, insight_stats_str)

@@ -271,8 +271,7 @@ _CHAT_CSS = """
 .hp-chat-row.hp-user { justify-content: flex-end; }
 .hp-chat-row.hp-assistant { justify-content: flex-start; }
 .hp-chat-bubble {
-    width: fit-content;   /* 짧은 말은 말풍선이 글에 맞게, 긴 말은 카드/그래프와 같은 폭까지 */
-    max-width: 100%;
+    max-width: 70%;   /* 대화하는 느낌: 말풍선은 화면 폭을 다 채우지 않고 좌(AI)/우(나)로 나뉜다 */
     padding: 11px 16px;
     border-radius: 18px;
     white-space: pre-wrap;
@@ -281,7 +280,6 @@ _CHAT_CSS = """
     font-size: 0.95rem;
 }
 .hp-chat-bubble.hp-user {
-    max-width: 80%;
     background: linear-gradient(135deg, #2563EB 0%, #1D4ED8 100%);
     color: #ffffff;
     border-bottom-right-radius: 4px;
@@ -292,6 +290,9 @@ _CHAT_CSS = """
     color: #1B2333;
     border: 1px solid #E3E8F2;
     border-bottom-left-radius: 4px;
+}
+@media (max-width: 640px) {
+    .hp-chat-bubble { max-width: 90%; }   /* 좁은 화면에서는 70%가 너무 좁다 */
 }
 </style>
 """

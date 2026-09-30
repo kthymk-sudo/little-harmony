@@ -16,25 +16,13 @@ import pandas as pd
 import streamlit as st
 from config import start_new_conversation
 from database.db_manager import (
-    save_conversation, make_conversation_title, apply_target_conditions, format_target_summary,
+    apply_target_conditions, format_target_summary,
 )
 from services.analysis_service import chart_spec_from
 from services.code_analyst import build_tables, run_analyst_turn, is_feedback_request, FEEDBACK_REQUEST_TEXT
-from ui.chart_render import build_pivot_chart_figure, pivot_table_df
+from ui.chart_render import render_chart_card
 from ui.chat_styles import inject_chat_css, render_message
-from ui.target_card import autosave as autosave_targeting
-
-
-def _autosave():
-    first_user_text = next((m['text'] for m in st.session_state.analysis_messages if m['role'] == 'user'), "")
-    if not save_conversation(
-        conv_id=st.session_state.analysis_current_conversation_id,
-        title=make_conversation_title(first_user_text, feature='analysis'),
-        phase='', messages=st.session_state.analysis_messages,
-        conditions={}, stats={}, member_ids=[], reasoning="", push_copy="",
-        feature='analysis',
-    ):
-        st.session_state.save_failed = True  # main.py가 다음 화면에서 경고를 띄운다
+from ui.target_card import autosave as autosave_targeting, autosave_simple
 
 
 def _render_steps(steps, checks):
@@ -94,7 +82,7 @@ def _render_actions(i, turn, profile_df, db_audience):
                     turn.pop("chart")
                 else:
                     turn["chart"] = chart_spec_from(turn["data"])  # AI 재호출 없음
-                _autosave()
+                autosave_simple('analysis')
                 st.rerun()
             if st.button("전체와 비교 피드백", width="content", key=f"analysis_feedback_{i}", icon=":material/insights:"):
                 _ask(FEEDBACK_REQUEST_TEXT, feedback=True)
@@ -140,19 +128,7 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
             st.session_state.analysis_stream_next = False
         if turn.get("data") or turn.get("table") or turn.get("audience"):
             _render_actions(i, turn, profile_df, db_audience)
-        chart_spec = turn.get("chart")
-        try:
-            fig = build_pivot_chart_figure(chart_spec)
-        except Exception:  # 그래프 하나가 깨져도 대화 화면 전체가 멈추지 않게
-            fig = None
-            st.caption(":material/warning: 이 그래프는 그리지 못했어요. 그래프 종류를 바꿔서 다시 요청해 주세요.")
-        if fig is not None:
-            with st.container(border=True):  # 그래프+표를 한 카드로 묶어 다른 카드(타겟 결과 등)와 같은 모양으로
-                st.plotly_chart(fig, width='stretch', key=f"analysis_chart_{i}")
-                table_df = pivot_table_df(chart_spec.get("data") or {})
-                if table_df is not None:
-                    with st.expander("표로 보기", icon=":material/table:"):
-                        st.dataframe(table_df, width='stretch')
+        render_chart_card(turn.get("chart"), f"analysis_chart_{i}")
         if turn.get("steps") or turn.get("checks"):
             _render_steps(turn.get("steps") or [], turn.get("checks") or [])
 
@@ -174,7 +150,7 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
                 status.update(label="분석 중 오류", state="error")
         st.session_state.analysis_messages.append(reply)
         st.session_state.analysis_stream_next = True
-        _autosave()
+        autosave_simple('analysis')
         st.rerun()
 
     user_text = st.chat_input("예: 8월 SO별 MAU와 재방문율, 특이한 SO가 있으면 어떤 콘텐츠 때문인지도 봐줘")

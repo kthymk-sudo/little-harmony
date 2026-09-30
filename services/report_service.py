@@ -12,7 +12,7 @@
 import re
 
 from ai_engine.gemini_api import generate_report_reply, generate_pivot_insight_reply, is_api_error
-from config import SO_REGIONS
+from config import SO_REGIONS, REGION_ORDER as _REGION_ORDER
 from database.db_manager import summarize_profile_context
 from services.analysis_service import run_pivot_analysis, insight_spec_str, insight_rows_str, data_period_str
 from utils.emm_export import parse_report_tree
@@ -107,33 +107,29 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
     checks = []
     missing = []
 
+    # 🌟 대조 검사: 정리 = 원문의 링크·숫자·문장이 결과에 있는지(긴 원문을 붙여넣었고 트리가 나왔을 때),
+    # 취합안 = 결과의 링크·숫자가 SO별 보고서에 실제로 있는지(지어낸 값이 없는지). 문제가 있으면 한 번만 다시 시킨다.
+    verify = None
     if kind == '정리' and len(user_text) >= _LONG_PASTE_CHARS and parse_report_tree(reply_text):
-        # 🌟 원문 대조: 긴 보고서 원문을 붙여넣었고 트리가 나왔을 때 - 원문의 링크·숫자가 결과에 있어야 한다
-        missing = find_missing_items(user_text, reply_text, lines=True)
-        if missing:
-            checks.append(f"누락 의심 {len(missing)}건 → 다시 정리 요청: {', '.join(missing[:_MAX_MISSING_SHOWN])}")
-            fix = ("원문에 있는데 정리 결과에서 빠졌거나 바뀐 링크·숫자·문장이 있어: " + ", ".join(missing[:_MAX_MISSING_SHOWN]) +
-                   ". 원문 그대로 해당 항목에 넣어서 전체 트리를 처음부터 다시 정리해줘. 다른 내용은 바꾸지 마.")
-            retry_raw = _ask_again(history_with_user, reply_text, fix, so_str)
-            if not is_api_error(retry_raw):
-                retry_text, retry_parsed = parse_target_conditions(retry_raw)
-                retry_missing = find_missing_items(user_text, retry_text, lines=True) if parse_report_tree(retry_text) else missing
-                if len(retry_missing) <= len(missing):  # 더 나아졌을 때만 바꾼다
-                    reply_text, parsed, missing = retry_text, retry_parsed or parsed, retry_missing
-                    info = parsed.get('보고서정보')
+        verify = (lambda t: find_missing_items(user_text, t, lines=True),
+                  "누락 의심 {n}건 → 다시 정리 요청: {items}",
+                  "원문에 있는데 정리 결과에서 빠졌거나 바뀐 링크·숫자·문장이 있어: {items}. 원문 그대로 해당 항목에 넣어서 전체 트리를 처음부터 다시 정리해줘. 다른 내용은 바꾸지 마.")
     elif kind == '취합안' and parse_report_tree(reply_text):
-        # 🌟 거꾸로 대조: 취합안의 링크·숫자가 SO별 보고서에 실제로 있는지(지어낸 값이 없는지)
         source = "\n".join(r['text'] for r in reports)
-        missing = find_missing_items(reply_text, source)
+        verify = (lambda t: find_missing_items(t, source),
+                  "SO 보고서에 없는 값 {n}건 → 다시 작성 요청: {items}",
+                  "취합안에 SO별 보고서에 없는 링크·숫자가 있어: {items}. SO별 보고서에 있는 값만 그대로 써서 전체 취합안을 처음부터 다시 작성해줘.")
+    if verify:
+        check, note, fix = verify
+        missing = check(reply_text)
         if missing:
-            checks.append(f"SO 보고서에 없는 값 {len(missing)}건 → 다시 작성 요청: {', '.join(missing[:_MAX_MISSING_SHOWN])}")
-            fix = ("취합안에 SO별 보고서에 없는 링크·숫자가 있어: " + ", ".join(missing[:_MAX_MISSING_SHOWN]) +
-                   ". SO별 보고서에 있는 값만 그대로 써서 전체 취합안을 처음부터 다시 작성해줘.")
-            retry_raw = _ask_again(history_with_user, reply_text, fix, so_str)
+            items = ", ".join(missing[:_MAX_MISSING_SHOWN])
+            checks.append(note.format(n=len(missing), items=items))
+            retry_raw = _ask_again(history_with_user, reply_text, fix.format(items=items), so_str)
             if not is_api_error(retry_raw):
                 retry_text, retry_parsed = parse_target_conditions(retry_raw)
-                retry_missing = find_missing_items(retry_text, source) if parse_report_tree(retry_text) else missing
-                if len(retry_missing) <= len(missing):
+                retry_missing = check(retry_text) if parse_report_tree(retry_text) else missing
+                if len(retry_missing) <= len(missing):  # 더 나아졌을 때만 바꾼다
                     reply_text, parsed, missing = retry_text, retry_parsed or parsed, retry_missing
                     info = parsed.get('보고서정보')
 
@@ -168,9 +164,6 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
         new_message["chart"] = chart_spec
     new_messages = messages + [user_turn, new_message]
     return new_messages, chart_spec
-
-
-_REGION_ORDER = list(SO_REGIONS)
 
 
 def _so_sort_key(so_name):

@@ -16,7 +16,7 @@
 import re
 import numpy as np
 import pandas as pd
-from config import SO_REGIONS
+from config import SO_TO_REGION, REGION_ORDER as _REGION_ORDER
 from database.db_manager import _filter_by_conditions
 
 # 행/열로 쓸 수 있는 필드 -> 실제 컬럼명 (다르면 매핑, 같으면 자기 자신).
@@ -28,8 +28,6 @@ _ALLOWED_ROW_COL_FIELDS = {
     '업로더 구분', '업로더SO', '업로더SO세부', '제작자', '가격유형', '등록월',
     '__전체',  # 내부용: 전체를 한 묶음으로 집계(비교 피드백의 전체값) - AI에게는 노출하지 않음
 }
-_SO_TO_REGION = {so: region for region, sos in SO_REGIONS.items() for so in sos}
-_REGION_ORDER = list(SO_REGIONS)
 _REGION_COLUMNS = {'SO권역', '업로더권역'}
 
 
@@ -152,7 +150,7 @@ def _add_derived_columns(df):
         df['__완료'] = ((retention >= _COMPLETION_THRESHOLD) * 100.0).where(retention.notna())
     for raw, region in (('시청자SO', 'SO권역'), ('업로더SO', '업로더권역')):
         if raw in df.columns:
-            df[region] = df[raw].map(lambda v: _SO_TO_REGION.get(v, v))
+            df[region] = df[raw].map(lambda v: SO_TO_REGION.get(v, v))
     return df
 
 

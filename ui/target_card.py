@@ -43,6 +43,19 @@ def autosave():
         st.session_state.save_failed = True  # main.py가 다음 화면에서 경고를 띄운다
 
 
+def autosave_simple(feature):
+    """분석/보고서 탭 자동저장(phase·조건·타겟이 없는 단순 챗). 상태 키: '{feature}_messages', '{feature}_current_conversation_id'."""
+    messages = st.session_state[f"{feature}_messages"]
+    first_user_text = next((m['text'] for m in messages if m['role'] == 'user'), "")
+    if not save_conversation(
+        conv_id=st.session_state[f"{feature}_current_conversation_id"],
+        title=make_conversation_title(first_user_text, feature=feature),
+        phase='', messages=messages, conditions={}, stats={}, member_ids=[], reasoning="", push_copy="",
+        feature=feature,
+    ):
+        st.session_state.save_failed = True  # main.py가 다음 화면에서 경고를 띄운다
+
+
 def render_target_card():
     """확정된 타겟 결과 카드(대상자 수 / 엑셀 다운로드 / 카피 작성 버튼)를 그린다.
     🌟 [UX 고도화] 이 카드를 메시지 목록 뒤에 고정으로 그리지 않고, 타겟이 확정된
