@@ -82,12 +82,26 @@ _CHAT_CSS = """
     background-color: #EEF2FF;
     border-color: #C7D6FB;
 }
-/* 대화 행의 이름변경/삭제 아이콘 버튼: 좁은 칸이라 여백을 없애고 아이콘을 가운데에 */
-[data-testid="stSidebar"] [data-testid="stColumn"]:not(:first-child) [data-testid="stButton"] button {
+/* 대화 행(칸 3개): 제목 버튼은 남는 폭을 다 쓰고, 이름변경/삭제는 같은 크기(40px)의 정사각형 아이콘 버튼 */
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(3)) {
+    gap: 0.35rem;
+    align-items: center;
+}
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(3)) > [data-testid="stColumn"]:first-child {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+}
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(3)) > [data-testid="stColumn"]:not(:first-child) {
+    flex: 0 0 40px !important;
+    width: 40px !important;
+    min-width: 40px !important;
+}
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(3)) > [data-testid="stColumn"]:not(:first-child) [data-testid="stButton"] button {
+    width: 40px;
     padding: 0;
     justify-content: center;
 }
-[data-testid="stSidebar"] [data-testid="stColumn"]:not(:first-child) [data-testid="stButton"] button > div {
+[data-testid="stSidebar"] [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"]:nth-child(3)) > [data-testid="stColumn"]:not(:first-child) [data-testid="stButton"] button > div {
     justify-content: center;
 }
 [data-testid="stSidebar"] [data-testid="stButton"] button p {
