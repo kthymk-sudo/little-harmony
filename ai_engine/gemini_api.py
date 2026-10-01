@@ -1,4 +1,5 @@
 # ai_engine/gemini_api.py
+import re
 import requests
 import time
 import streamlit as st
@@ -12,26 +13,28 @@ _http_session = requests.Session()
 _LATEST_FLASH_ALIAS = "models/gemini-flash-latest"
 
 # 🌟 [429 대응 고도화] 실험/미리보기 계열 등 무료 등급 한도가 낮은 모델 키워드 배제
-_AVOID_MODEL_KEYWORDS = ("exp", "preview", "thinking", "image", "audio", "tts", "embedding", "vision", "native")
+_AVOID_MODEL_KEYWORDS = ("exp", "preview", "thinking", "image", "audio", "tts", "embedding", "vision", "native", "omni", "live")
 
 # 🌟 [한도 초과 모델 관리 - 시간 기반 만료] 429(일일 한도 초과) 에러로 더 이상 쓸 수 없는
 # 모델을 "모델명 -> 배제된 시각(epoch)"으로 기록한다. 구글의 일일 한도는 자정마다
 # 초기화되는데, 예전에는 이 목록이 프로세스가 재시작되기 전까지 영원히 비워지지 않아서,
 # 어제 한도 초과로 배제한 모델이 오늘 한도가 다시 찼는데도 계속 후순위로 밀리는 문제가
 # 있었다. 이제 배제 후 24시간이 지나면 자동으로 다시 후보에 포함시킨다.
-_EXHAUSTED_MODELS = {}
-_EXHAUSTED_TTL_SECONDS = 24 * 60 * 60
+_EXHAUSTED_MODELS = {}   # 모델명 -> 이 시각(epoch)까지 쉬게 한다
+_DAILY_REST = 24 * 60 * 60   # 일일 한도 초과·더 이상 쓸 수 없는 모델
+_MINUTE_REST = 60            # 분당 한도(요청이 몰린 것)는 잠깐만 쉬면 풀린다 - 하루 종일 배제하면 안 된다
+_TROUBLE_REST = 5 * 60       # 서버 과부하·무응답은 일시적일 수 있다
 
 
-def _mark_exhausted(model_name):
-    _EXHAUSTED_MODELS[model_name] = time.time()
+def _mark_exhausted(model_name, rest=_DAILY_REST):
+    _EXHAUSTED_MODELS[model_name] = time.time() + rest
 
 
 def _is_still_exhausted(model_name):
-    exhausted_at = _EXHAUSTED_MODELS.get(model_name)
-    if exhausted_at is None:
+    until = _EXHAUSTED_MODELS.get(model_name)
+    if until is None:
         return False
-    if time.time() - exhausted_at >= _EXHAUSTED_TTL_SECONDS:
+    if time.time() >= until:
         _EXHAUSTED_MODELS.pop(model_name, None)
         return False
     return True
@@ -69,7 +72,11 @@ def _pick_best_flash_model(available_models):
         return latest_alias
 
     stable = [m for m in flash_models if not any(k in m.lower() for k in _AVOID_MODEL_KEYWORDS)]
-    candidates = stable or flash_models
+
+    def rank(name):   # 상위 모델부터: lite가 아닌 것 먼저, 버전이 높은 것 먼저
+        version = re.search(r"gemini-(\d+(?:\.\d+)?)", name)
+        return ('lite' in name.lower(), -(float(version.group(1)) if version else 0))
+    candidates = sorted(stable, key=rank) or flash_models
     return candidates[0] if candidates else None
 
 
@@ -90,9 +97,9 @@ def _discover_target_model():
     return target_model
 
 
-def _switch_model(target_model, payload):
-    """이 모델을 소진으로 표시하고 다른 모델로 다시 호출한다(한도 초과·서버 과부하·무응답 공통). 바꿀 모델이 없으면 None."""
-    _mark_exhausted(target_model)
+def _switch_model(target_model, payload, rest=_DAILY_REST):
+    """이 모델을 rest초 동안 쉬게 하고 다른 모델로 다시 호출한다(한도 초과·서버 과부하·무응답 공통). 바꿀 모델이 없으면 None."""
+    _mark_exhausted(target_model, rest)
     _discover_target_model.clear()
     new_target_model = _discover_target_model()
     if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
@@ -135,7 +142,8 @@ def _post_generate(payload):
                             wait_s = (2 ** attempt) + 1
                         time.sleep(min(wait_s, 20))
                         continue
-                    switched = _switch_model(target_model, payload)
+                    # 일일 한도는 하루 쉬게 하고, 분당 한도(요청이 몰림)는 1분만 쉬게 한다 - 구글 응답의 한도 이름으로 구분
+                    switched = _switch_model(target_model, payload, _DAILY_REST if "PerDay" in res_gen.text else _MINUTE_REST)
                     return switched if switched is not None else ("error",
                         "⚠️ [모든 AI 모델 한도 초과] 현재 사용 가능한 모든 AI 모델의 일일 한도를 모두 소진했습니다. "
                         "내일 다시 시도하시거나, Google AI Studio에서 결제 설정을 확인해주세요.")
@@ -145,16 +153,13 @@ def _post_generate(payload):
                         time.sleep(2)
                         continue
                     # 🌟 [503 서버 과부하 우회] 구글 서버가 뻗었을 때도 즉시 다른 모델로 갈아탑니다.
-                    switched = _switch_model(target_model, payload)
+                    switched = _switch_model(target_model, payload, _TROUBLE_REST)
                     return switched if switched is not None else ("error",
                         f"⚠️ [서버 과부하] 구글 AI 서버가 혼잡하여 다른 모델로 우회하려 했으나 모두 실패했습니다. (상태코드: {res_gen.status_code})")
 
-                elif res_gen.status_code == 404:
-                    _discover_target_model.clear()
-                    if target_model != _LATEST_FLASH_ALIAS and first_try:
-                        target_model = _LATEST_FLASH_ALIAS
-                        continue
-                    return "error", "⚠️ [모델 오류] 사용하려던 AI 모델을 찾을 수 없어 안전 모델로 자동 재시도 중 실패했습니다."
+                elif res_gen.status_code == 404:   # 더 이상 쓸 수 없는 모델(예: 서비스 종료) - 오래 쉬게 하고 다른 모델로
+                    switched = _switch_model(target_model, payload)
+                    return switched if switched is not None else ("error", "⚠️ [모델 오류] 사용할 수 있는 AI 모델을 찾지 못했습니다.")
 
                 else:
                     return "error", f"⚠️ API 요청 거부 ({res_gen.status_code}): {res_gen.text}"
@@ -164,7 +169,7 @@ def _post_generate(payload):
                     time.sleep(2)
                     continue
                 # 🌟 [타임아웃 무응답 우회] 응답이 너무 오래 걸려도 버리고 다른 모델로 갈아탑니다.
-                switched = _switch_model(target_model, payload)
+                switched = _switch_model(target_model, payload, _TROUBLE_REST)
                 return switched if switched is not None else ("error", f"⚠️ 네트워크 통신 오류(Timeout 등)가 지속되어 중지합니다: {str(req_e)}")
 
     except Exception as e:
