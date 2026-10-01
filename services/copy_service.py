@@ -115,6 +115,8 @@ def process_copy_turn(messages, target_summary_str, reasoning, user_text, copy_t
 
 
 if __name__ == "__main__":
+    import services.answer_check as _ac
+    _ac.check_answer = lambda p: '{"문제": []}'   # 검수 AI는 테스트에서 부르지 않는다(문제 없음)
     import sys
     import services.agent_loop as loop
     me = sys.modules[__name__]

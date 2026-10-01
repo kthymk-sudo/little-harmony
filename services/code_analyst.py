@@ -14,7 +14,6 @@
 # ============================================================
 import re
 
-import numpy as np
 import pandas as pd
 
 from ai_engine.gemini_api import generate_code_analyst_step, is_api_error
@@ -26,6 +25,10 @@ from services.analysis_service import (
     CHART_TYPES, normalize_pivot_result,
 )
 from utils.response_parser import parse_target_conditions
+from services.answer_check import ungrounded_numbers, review, revise_note
+from config import METRIC_DEFINITIONS
+
+_METRIC_TEXT = "\n".join(f"{k} = {v}" for k, v in METRIC_DEFINITIONS.items())   # 검수 근거: 용어 정의도 사실로 본다
 
 LIGHT_NOTE = "\n(타겟팅·보고서 화면에서 온 간단한 확인 질문이야: 계산은 평소처럼 정확하게 하고 위에 적힌 조건·기간·대상을 빠짐없이 적용해. 답은 필요한 수치만 짧게 하되 어떤 집단·기간을 기준으로 몇 명인지 밝혀. 그래프는 만들지 마.)"
 _MAX_STEPS = 6            # 코드 실행 최대 5번 + 마지막 답변
@@ -82,35 +85,6 @@ def describe_tables(tables):
 def run_code(code, tables, previous):
     """같은 프로세스에서 실행(격리 프로세스를 못 쓸 때의 대체 경로이자 테스트용)."""
     return sandbox.execute(code, tables, previous, list(_REGION_ORDER), _TIMEOUT_SEC)
-
-
-# 답변 속 숫자는 천 단위 쉼표(1,514)를 허용하고, 실행 결과(CSV·pandas 출력)는 쉼표가 구분자라 숫자만 읽는다
-_NUMBER = re.compile(r'(?<![\w.])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?')
-_PLAIN_NUMBER = re.compile(r'\d+(?:\.\d+)?')
-
-
-# 실행 결과의 숫자를 사람이 흔히 바꿔 쓰는 형태: 그대로, 비율→%(×100), %→비율(÷100), 초→분(÷60), 초→시간(÷3600)
-_UNIT_TRANSFORMS = (1, 100, 0.01, 1 / 60, 1 / 3600)
-_REL_TOLERANCE = 0.001   # 반올림 차이 허용(0.1%)
-_ABS_TOLERANCE = 0.051   # 소수 첫째 자리 반올림 허용
-
-
-def ungrounded_numbers(answer, evidence):
-    """답변의 숫자 중 실행 결과(evidence)에서 확인되지 않는 것.
-    반올림·% 변환·초→분/시간 변환은 확인된 것으로 본다. 연도·월·일 같은 작은 정수는 문맥상 흔해서 제외한다."""
-    values = [float(t) for t in _PLAIN_NUMBER.findall(evidence)]
-    candidates = np.unique(np.array([v * k for v in values for k in _UNIT_TRANSFORMS] or [np.nan]))
-    missing = []
-    for token in _NUMBER.findall(answer):
-        value = float(token.replace(',', ''))
-        if value <= 31 and value.is_integer() or 2000 <= value <= 2100:
-            continue
-        tolerance = max(_ABS_TOLERANCE, abs(value) * _REL_TOLERANCE)
-        i = np.searchsorted(candidates, value)
-        near = candidates[max(i - 1, 0):i + 1]
-        if not np.any(np.abs(near - value) <= tolerance):
-            missing.append(token)
-    return missing
 
 
 def _as_frame(value):
@@ -297,24 +271,25 @@ class _StepRunner:
             self.session.close()
 
 
-def run_analyst_turn(messages, user_text, tables, on_step=None):
+def run_analyst_turn(messages, user_text, tables, on_step=None, check=True):
     """한 턴 처리. 반환: 새 assistant 메시지 dict
        {'text', 'steps': [{'번호','설명','code','preview'|'error','printed'}], 'data'(그래프용, 선택), 'chart'(선택),
         'audience'(타겟팅으로 보낼 수 있는 집단, 선택)}
-    🌟 질문의 뜻 판단(되묻기·다른 탭 안내·거절)은 별도 호출 없이 이 분석가가 같은 대화 안에서 한다: 계산이 필요 없으면 코드 없이 글로만 답한다."""
+    🌟 질문의 뜻 판단(되묻기·다른 탭 안내·거절)은 별도 호출 없이 이 분석가가 같은 대화 안에서 한다: 계산이 필요 없으면 코드 없이 글로만 답한다.
+    check: 답변 검수(services/answer_check.py)를 할지. 타겟팅·보고서의 간단한 확인은 그쪽 최종 답에서 검수하므로 여기서는 하지 않는다."""
     runner = _StepRunner(tables)
     try:
-        return _run_turn(messages, user_text, tables, on_step, runner)
+        return _run_turn(messages, user_text, tables, on_step, runner, check)
     finally:
         runner.close()
 
 
-def _run_turn(messages, user_text, tables, on_step, runner):
+def _run_turn(messages, user_text, tables, on_step, runner, check=True):
     schema = describe_tables(tables)
     history = _history_str(messages)
     steps, values, audiences = [], {}, {}
     valid_ids = set(tables['고객']['R고객번호'].astype(str)) if '고객' in tables else None
-    correction, retries, verify_retries = "", 0, 0
+    correction, retries, verify_retries, reviewed = "", 0, 0, not check
     checks = []  # 답변 검증 기록(지어낸 숫자 차단 등) - "계산 과정 보기"에 같이 보여준다
     unverified = []
     i = 0
@@ -333,7 +308,8 @@ def _run_turn(messages, user_text, tables, on_step, runner):
         if not has_code and not reason:
             # 🌟 최종 답변의 숫자가 실제 실행 결과(또는 이전 답변)에 있는지 대조 - 지어낸 숫자 차단
             evidence = _evidence_text(messages, steps, user_text)
-            missing = ungrounded_numbers(parse_target_conditions(_CODE_BLOCK.sub('', raw))[0], evidence)
+            answer_text = parse_target_conditions(_CODE_BLOCK.sub('', raw))[0]
+            missing = ungrounded_numbers(answer_text, evidence)
             if missing and verify_retries < _MAX_VERIFY_RETRIES:
                 verify_retries += 1
                 nudge_label = f"확인 안 된 숫자({', '.join(missing[:6])}) → 코드로 계산하도록 다시 요청"
@@ -342,6 +318,14 @@ def _run_turn(messages, user_text, tables, on_step, runner):
                          f"이번 응답은 최종 답변이 아니라 반드시 ```python 코드블록```이어야 해.")
             elif missing:
                 unverified = missing  # 그래도 안 되면 답변은 보여주되, 확인 안 된 숫자를 표시한다
+            elif not reviewed:
+                # 🌟 [답변 검수] 숫자 말고도, 하지 않은 계산을 했다고 하거나 확인 안 된 원인을 단정하거나 실패를 성공처럼 말했는지 한 번 더 본다
+                reviewed = True
+                actions = [f"계산 {s['번호']}단계({s['설명']}) - " + ("오류" if s.get('error') else "성공") for s in steps]
+                problems = review(answer_text, f"{schema}\n[지표 정의]\n{_METRIC_TEXT}\n{evidence}", actions, numbers=False)
+                if problems:
+                    nudge_label = "검수: " + " / ".join(problems)[:300]
+                    nudge = revise_note(problems) + " 더 계산이 필요하면 ```python 코드블록```을, 아니면 최종 답변 형식(끝에 JSON)으로 다시 써."
         if reason and retries < _MAX_RETRIES:
             correction, retries = reason, retries + 1
             checks.append(f"다시 요청: {reason}")
@@ -413,7 +397,7 @@ def lazy_tables(db_audience, db_content, profile_df):
 def quick_check(tables, question):
     """타겟팅·보고서의 간단한 수치 확인. 반환: (분석 답변 dict, None) 또는 (None, 실패 안내 글)."""
     try:
-        reply = run_analyst_turn([], question + LIGHT_NOTE, tables)
+        reply = run_analyst_turn([], question + LIGHT_NOTE, tables, check=False)
     except Exception:
         return None, "데이터를 계산하는 중 문제가 생겼어. 잠시 뒤 다시 해 봐도 돼."
     return (None, reply['text']) if is_api_error(reply.get('text', '')) else (reply, None)
@@ -469,6 +453,8 @@ def _final_message(raw, steps, values, messages, audiences=None):
 
 
 if __name__ == "__main__":
+    import services.answer_check as _ac
+    _ac.check_answer = lambda p: '{"문제": []}'   # 검수 AI는 테스트에서 부르지 않는다(문제 없음)
     import json
 
     ISOLATED = False  # 아래 흐름 테스트는 같은 프로세스에서(빠르게). 격리 프로세스는 마지막에 따로 실제로 띄워서 확인한다
@@ -643,4 +629,15 @@ jul, aug = m['2026-07'], m['2026-08']
     assert refused['text'].startswith("개인을 식별") and not refused['steps'] and 'data' not in refused
     assert _invalid_reason("안녕하세요", False, executed=False) is None and _invalid_reason("5건이에요", False, executed=True)
     assert "분석 탭" not in get_code_analyst_prompt("스키마", "(없음)", "질문", "(아직 없음)", False) and "'타겟팅 & 카피' 탭" in get_code_analyst_prompt("스키마", "(없음)", "질문", "(아직 없음)", False)
+    # 답변 검수: 확인 안 된 원인을 단정한 답은 고쳐 쓰게 한다(검수 근거에 계산 기록이 들어간다)
+    verdicts = iter(['{"문제": [{"문장": "여름 성수기 때문", "이유": "계산으로 확인하지 않은 원인"}]}', '{"문제": []}'])
+    seen = []
+    _ac.check_answer = lambda p: seen.append(p) or next(verdicts)
+    prompts_seen = []
+    replies = iter(["건수\n```python\n결과 = len(시청)\n```", '5건이고 여름 성수기 때문이에요.\n```json\n{"그래프": null}\n```',
+                    '5건이에요.\n```json\n{"그래프": null}\n```'])
+    globals()['generate_code_analyst_step'] = lambda prompt: prompts_seen.append(prompt) or next(replies)
+    checked = run_analyst_turn([], "몇 건이고 왜 그래?", tables)
+    assert checked['text'] == '5건이에요.' and '시스템 검수' in prompts_seen[-1] and '계산 1단계(건수) - 성공' in seen[0] and any(c.startswith('검수:') for c in checked['checks'])
+    _ac.check_answer = lambda p: '{"문제": []}'
     print("code_analyst self-check OK")

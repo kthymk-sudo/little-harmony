@@ -4,13 +4,17 @@
 # 모델에 시스템 지침 + 대화를 보내고, 모델이 도구를 부르면 실행해서 결과를 돌려주는 일을 글 답이 나올 때까지 반복한다.
 # 🌟 [거짓 완료 방지] 모델이 도구를 안 부르고 글로만 "했어요"라고 하거나 도구 호출을 글로 흉내 내면(tool_call) 그 답을 버리고,
 # 이번에는 도구를 반드시 부르게 해서 다시 시킨다.
+# 🌟 [답변 검수] 글 답은 내보내기 전에 실제로 한 일·근거 자료와 대조한다(services/answer_check.py).
 # ============================================================
+import json
 import re
 
 from ai_engine.gemini_api import call_agent
+from services.answer_check import review, revise_note, ungrounded_numbers
 
 MAX_ROUNDS = 8       # 한 턴에서 도구를 부르고 결과를 돌려주는 최대 횟수
 _MAX_NUDGES = 2      # 도구를 부르지 않고 "했어요"라고만 답했을 때 되돌려 보내는 최대 횟수
+_MAX_REVISIONS = 1   # 검수에서 문제가 나온 답을 고쳐 쓰게 하는 최대 횟수
 _DONE_CLAIM = re.compile(r"저장(했|해 ?[두뒀]|됐|되었)|만들었|만들어 ?[두뒀]|정리(했|해 ?[두뒀])|추가했|반영했|담았|바꿨|수정했|뒤집었|요약했|합쳤"
                          r"|설정했|적용했|뺐|넣었|작성했|써 ?[두뒀]|다시 썼|계산했")   # 일을 마쳤다는 말(거짓말 감지용)
 _TOOL_TEXT = "tool_call"   # 모델이 도구 호출을 글로 흉내 낸 흔적
@@ -19,10 +23,32 @@ _NUDGE = ("(시스템 알림) 방금 답에서 작업을 마쳤다고 했지만 
 _ERROR = {"오류": "처리 중 문제가 생겼어. 다시 시도하거나 사람 말로 사정을 설명해 줘."}
 
 
+def _succeeded(result):
+    """도구 결과가 실제로 일을 해낸 것인지(저장 거부·문제·오류가 아닌지)."""
+    return not ({"오류", "문제"} & set(result)) and all(result.get(k, True) is not False for k in ("저장됨", "적용됨", "보임"))
+
+
+def _evidence(system, contents, start):
+    """검수 근거: 지침·저장된 자료(system), 지난 대화, 이번 턴의 도구 결과. 이번 턴에 AI가 쓴 초안(contents[start:]의 model 글)은 근거가 아니다."""
+    parts = [system]
+    for i, c in enumerate(contents):
+        if i >= start and c['role'] == 'model':
+            continue
+        for p in c['parts']:
+            if p.get('text') and not p.get('thought') and not p['text'].startswith("(시스템"):   # 시스템이 넣은 알림·검수 지적은 근거가 아니다
+                parts.append(p['text'])
+            elif 'functionResponse' in p:
+                parts.append(json.dumps(p['functionResponse']['response'], ensure_ascii=False))
+    return "\n".join(parts)
+
+
 def run_agent(system, contents, declarations, tools, turn, temperature=0.2):
     """contents(대화)에 모델 응답과 도구 결과를 이어 붙이며 반복한다. tools: {이름: 함수(turn, args) -> dict}, turn.worked: 이번 턴에 도구가 실제로 일을 했는지.
+    🌟 글 답이 나오면 내보내기 전에 검수한다(services/answer_check.py): 문제가 있으면 AI에게 돌려줘 고쳐 쓰게 하고, 고친 뒤에도 남으면 답 끝에 밝힌다.
     반환: (마지막 글 답, API 오류 문구). 도구만 계속 부르다 끝나면 글 답은 빈 문자열이다."""
-    nudges, force = 0, False
+    labels = {d['name']: d['description'].split('.')[0] for d in declarations}
+    start = len(contents) - 1   # 이번 턴의 사용자 말부터
+    actions, nudges, revisions, force = [], 0, 0, False
     for _ in range(MAX_ROUNDS):
         content, err = call_agent(system, contents, declarations, temperature=temperature, force_tool=force)
         force = False
@@ -38,8 +64,21 @@ def run_agent(system, contents, declarations, tools, turn, temperature=0.2):
                 contents[-1]["parts"].append({"text": _NUDGE})
                 force = True
                 continue
-            return "".join(p.get('text', '') for p in content['parts']
-                           if 'functionCall' not in p and not p.get('thought') and _TOOL_TEXT not in p.get('text', '')).strip(), ""
+            answer = "".join(p.get('text', '') for p in content['parts']
+                             if 'functionCall' not in p and not p.get('thought') and _TOOL_TEXT not in p.get('text', '')).strip()
+            answer = answer.replace("**", "")   # 말풍선에 마크다운 강조 기호가 그대로 보이지 않게
+            evidence = _evidence(system, contents, start)
+            if revisions < _MAX_REVISIONS:
+                problems = review(answer, evidence, actions)
+                if problems:
+                    revisions += 1
+                    contents.append({"role": "user", "parts": [{"text": revise_note(problems)}]})
+                    continue
+            else:   # 고쳐 쓴 답은 숫자만 다시 대조하고(검수 AI의 지나친 지적으로 멀쩡한 답에 경고가 붙지 않게), 그래도 확인되지 않는 숫자는 숨기지 않고 밝힌다
+                missing = ungrounded_numbers(answer, evidence, measured_only=True)
+                if missing:
+                    answer += "\n\n※ 다음 숫자는 데이터에서 확인되지 않았어요. 참고만 해 주세요: " + ", ".join(missing[:8])
+            return answer, ""
         results = []
         for call in calls:
             tool = tools.get(call.get('name'))
@@ -48,6 +87,7 @@ def run_agent(system, contents, declarations, tools, turn, temperature=0.2):
             except Exception:
                 result = _ERROR
             results.append({"functionResponse": {"name": call.get('name'), "response": result}})
+            actions.append(f"{labels.get(call.get('name'), call.get('name'))} - " + ("성공" if _succeeded(result) else "실패·거부(저장·반영되지 않음)"))
         contents.append({"role": "user", "parts": results})
     return "", ""
 

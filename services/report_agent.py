@@ -279,6 +279,8 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
 
 
 if __name__ == "__main__":
+    import services.answer_check as _ac
+    _ac.check_answer = lambda p: '{"문제": []}'   # 검수 AI는 테스트에서 부르지 않는다(문제 없음)
     import sys
     me = sys.modules[__name__]
     import services.agent_loop as loop

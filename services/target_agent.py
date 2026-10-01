@@ -206,6 +206,8 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
 
 
 if __name__ == "__main__":
+    import services.answer_check as _ac
+    _ac.check_answer = lambda p: '{"문제": []}'   # 검수 AI는 테스트에서 부르지 않는다(문제 없음)
     import sys
     import pandas as pd
     import services.agent_loop as loop
@@ -273,4 +275,15 @@ if __name__ == "__main__":
     script("조건을 설정했어요.", ("set_conditions", {"changes_json": '{"성별": "남자"}'}), "남자로 잡았어요.")
     m7, c7 = run([], {}, "남자만")
     assert c7 == {"성별": "남자"} and sent[-2][2] is True
+    # 답변 검수: 문제가 나오면 AI에게 돌려줘 고쳐 쓰게 하고(검수 근거에 도구 결과가 들어간다), 고친 뒤에도 남으면 답 끝에 밝힌다
+    verdicts = iter(['{"문제": [{"문장": "카피도 써 뒀어요", "이유": "이번에 카피를 쓴 기록이 없음"}]}', '{"문제": []}'])
+    checked = []
+    _ac.check_answer = lambda p: checked.append(p) or next(verdicts)
+    script(("set_conditions", {"changes_json": '{"성별": "여자"}'}), "여자로 잡았어요. 카피도 써 뒀어요.", "여자로 잡았어요.")
+    m8, c8 = run([], {}, "여자만")
+    assert m8[-1]["text"] == "여자로 잡았어요." and "시스템 검수" in str(sent[-1][1][-1]) and "타겟 조건을 추가·수정·삭제" in checked[0] and "예상인원" in checked[0]
+    _ac.check_answer = lambda p: '{"문제": [{"문장": "x", "이유": "근거 없음"}]}'
+    script("대전은 999명이에요.", "대전은 999명이에요.")
+    assert run([], {}, "대전 몇 명?")[0][-1]["text"].startswith("대전은 999명이에요.\n\n※ 다음 숫자는 데이터에서 확인되지 않았어요. 참고만 해 주세요: 999")
+    _ac.check_answer = lambda p: '{"문제": []}'
     print("target_agent self-check OK")
