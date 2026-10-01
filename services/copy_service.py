@@ -9,6 +9,7 @@
 # ============================================================
 import re
 from ai_engine.gemini_api import generate_ai_push_copy, is_api_error
+from services.intent_gate import assess, with_notice, last_assistant_text
 from config import PUSH_TITLE_MAX_LEN, PUSH_BODY_MAX_LEN, SMS_TITLE_MAX_LEN, SMS_BODY_MAX_LEN
 from utils.response_parser import format_push_copy_for_display
 
@@ -41,16 +42,23 @@ def is_over_limit(copy_text, copy_type='push'):
 def process_copy_turn(messages, target_summary_str, reasoning, user_text, copy_type='push'):
     """카피 작성 대화 한 턴 처리 (Streamlit 비의존 - 단위 테스트 가능).
     copy_type: 'push'(앱푸시) 또는 'sms'(문자) - 어떤 형식/글자수 제약으로 만들지 결정.
-    반환: (new_messages, copy_text) - AI 호출이 실패하면 copy_text는 None."""
-    raw = generate_ai_push_copy(target_summary_str, reasoning, user_text or "", copy_type=copy_type)
+    반환: (new_messages, copy_text) - AI 호출이 실패하면 copy_text는 None.
+    🌟 실무자가 직접 쓴 수정 요청(user_text)은 먼저 뜻·의도를 판단한다: 불분명하면 되묻고, 불법(허위·과장 광고, "(광고)" 표기·수신거부 안내 삭제 등)이면
+    거절하고, 그때는 카피를 바꾸지 않는다(copy_text=None)."""
     new_messages = messages + ([{"role": "user", "text": user_text}] if user_text else [])
+    verdict = {"판단": "진행", "주의": ""}
+    if user_text and user_text != SHORTEN_REQUEST:
+        verdict = assess('targeting', user_text, last_assistant_text(messages), f"{'문자(SMS)' if copy_type == 'sms' else '앱푸시'} 카피를 작성·수정하는 중")
+        if verdict['판단'] != '진행':
+            return new_messages + [{"role": "assistant", "text": verdict['답변']}], None
+    raw = generate_ai_push_copy(target_summary_str, reasoning, user_text or "", copy_type=copy_type)
     if is_api_error(raw):
         return new_messages + [{"role": "assistant", "text": raw}], None
     copy_text = format_push_copy_for_display(raw)
     label = COPY_TYPE_LABELS.get(copy_type, COPY_TYPE_LABELS['push'])
     report = length_report(copy_text, copy_type)
     labeled_text = f"[{label}]\n\n{copy_text}" + (f"\n\n📏 글자수 확인\n{report}" if report else "")
-    return new_messages + [{"role": "assistant", "text": labeled_text}], copy_text
+    return new_messages + [{"role": "assistant", "text": with_notice(labeled_text, verdict)}], copy_text
 
 
 if __name__ == "__main__":
@@ -58,6 +66,8 @@ if __name__ == "__main__":
               "[버전 2: 혜택 강조형]\n■ 제목: 이번 주 새로 올라온 트로트 무대와 노래교실을 한 번에 모아보기\n■ 내용: 짧게\n")
     report = length_report(sample, 'push')
     assert report.splitlines()[0].startswith("✅ 버전 1: 제목 13/30자") and "⚠️ 버전 2" in report, report
+    import services.intent_gate as _g0
+    _g0._ask = lambda p: '{"판단": "진행"}'
     globals()['generate_ai_push_copy'] = lambda *a, **k: "⚠️ [서버 과부하] 잠시 후 다시"
     msgs, copy = process_copy_turn([], "요약", "근거", "")
     assert copy is None and msgs[-1]['text'].startswith("⚠️"), "실패는 카피로 저장하지 않는다"
@@ -65,4 +75,11 @@ if __name__ == "__main__":
     msgs, copy = process_copy_turn([], "요약", "근거", "더 짧게")
     assert copy == sample.strip() and msgs[-1]['text'].startswith("[📱 앱푸시 카피]") and '**' not in msgs[-1]['text']
     assert is_over_limit(sample, 'push') and not is_over_limit(sample.split("[버전 2")[0], 'push') and not is_over_limit("", 'push')
+    # 요청 판단: 불법 요청은 카피를 바꾸지 않고 거절만 한다
+    import services.intent_gate as _gate
+    _gate._ask = lambda p: '{"판단": "거절", "답변": "(광고) 표기를 빼는 것은 도와드릴 수 없어요. 대신 짧고 눈에 띄는 제목으로 다시 써 드릴까요?"}'
+    msgs, copy = process_copy_turn([], "요약", "근거", "(광고) 표기 빼고 써줘")
+    assert copy is None and msgs[-1]['text'].startswith("(광고) 표기를 빼는 것은") and msgs[0]['text'] == "(광고) 표기 빼고 써줘"
+    _gate._ask = lambda p: (_ for _ in ()).throw(AssertionError("글자수 줄이기 요청은 판단하지 않는다"))
+    assert process_copy_turn([], "요약", "근거", SHORTEN_REQUEST)[1] == sample.strip()
     print("copy_service self-check OK")

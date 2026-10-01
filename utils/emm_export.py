@@ -76,6 +76,10 @@ _MARKER_DEPTH = {"▸": 1, "·": 2}   # 그 밖의 항목 기호(-, •, ▪ 등
 _ITEM_MARKERS = "▸·-•▪◦‣∙"
 
 
+def _has_center(report_text):
+    return any(line.strip().lstrip("﻿").startswith("📌") for line in report_text.splitlines())
+
+
 def parse_report_tree(report_text):
     """보고서 답변 텍스트(📌 중심 + 들여쓰기 항목 트리 + 피드백)에서 트리 부분만 뽑아
     [(depth, text), ...] 리스트로 변환한다. 피드백/데이터 인사이트 문단은 제외.
@@ -85,6 +89,8 @@ def parse_report_tree(report_text):
     ▸=1단계, ·=2단계). 앞 줄보다 두 단계 이상 깊어지는 줄은 한 단계만 깊어지게 맞춘다 - 가지가 끊겨 사라지지 않게."""
     nodes = []
     prev_depth = -1
+    if not _has_center(report_text):   # 트리에는 항상 📌 중심이 있다. 없으면 "- 항목"으로 된 일반 글 목록이므로 트리가 아니다
+        return []
     for raw in report_text.splitlines():
         line = raw.replace("\t", "    ").rstrip()
         stripped = line.strip().lstrip("﻿")
@@ -113,6 +119,8 @@ def parse_report_tree(report_text):
 
 def strip_tree_lines(report_text):
     """답변에서 트리 줄(📌·▸·· 등으로 시작하는 줄)을 뺀 나머지 글(핵심 요약, 구성 메모, 설명 문장 등). 트리는 그림으로 따로 보여 주기 위해 쓴다."""
+    if not _has_center(report_text):
+        return report_text.strip()
     keep = []
     for raw in report_text.splitlines():
         s = raw.strip().lstrip("﻿")
@@ -313,4 +321,7 @@ if __name__ == "__main__":
     # 트리 줄을 뺀 나머지 글(핵심 요약·구성 메모)만 남긴다
     assert strip_tree_lines("📌 중심\n  ▸ 가\n    · 나\n\n핵심 요약: 성과가 좋았어요.\n\n구성 메모: 묶었어요.") == "핵심 요약: 성과가 좋았어요.\n\n구성 메모: 묶었어요."
     assert strip_tree_lines("📌 중심\n  ▸ 가") == ""
+    # 📌 중심이 없는 "- 항목" 글 목록은 트리가 아니다(자유 답변의 글머리 목록이 트리로 오인되지 않게)
+    bullets = "이번 주 특징이에요.\n- 대전 : 조회수 증가\n- 광주 : 신규 가입\n- 충청 : 보고 없음"
+    assert parse_report_tree(bullets) == [] and strip_tree_lines(bullets) == bullets
     print("emm_export self-check OK")

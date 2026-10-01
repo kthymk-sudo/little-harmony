@@ -25,8 +25,10 @@ from services.analysis_service import (
     _add_derived_columns, _with_content_attrs, _REGION_ORDER, _REGION_COLUMNS, _region_sort_key,
     CHART_TYPES, normalize_pivot_result,
 )
+from services.intent_gate import assess, with_notice, last_assistant_text
 from utils.response_parser import parse_target_conditions
 
+LIGHT_NOTE = "\n(타겟팅·보고서 화면에서 온 간단한 확인 질문이야: 계산은 평소처럼 정확하게 하고 위에 적힌 조건·기간·대상을 빠짐없이 적용해. 답은 필요한 수치만 짧게 하되 어떤 집단·기간을 기준으로 몇 명인지 밝혀. 그래프는 만들지 마.)"
 _MAX_STEPS = 6            # 코드 실행 최대 5번 + 마지막 답변
 _MAX_RETRIES = 3          # 형식이 틀리거나 결과를 지어낸 응답을 다시 요청하는 최대 횟수(턴 전체)
 _DEEP_QUESTION = re.compile(r'특이|원인|왜|이유|유입|영향|때문|요인')
@@ -312,15 +314,24 @@ class _StepRunner:
             self.session.close()
 
 
-def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False):
+def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False, gate=True):
     """한 턴 처리. 반환: 새 assistant 메시지 dict
        {'text', 'steps': [{'번호','설명','code','preview'|'error','printed'}], 'data'(그래프용, 선택), 'chart'(선택),
-        'audience'(타겟팅으로 보낼 수 있는 집단, 선택)}"""
+        'audience'(타겟팅으로 보낼 수 있는 집단, 선택)}
+    🌟 gate: 먼저 질문의 뜻·의도를 판단한다(되묻기·안내·거절은 계산 없이 그 답만). 이미 판단을 거친 질문(타겟팅에서 넘어온 것)과
+    시스템이 만든 비교 피드백 요청(feedback)은 다시 판단하지 않는다."""
+    verdict = {"판단": "진행", "주의": ""}
+    if gate and not feedback:
+        verdict = assess('analysis', user_text, last_assistant_text(messages), "시청 데이터 분석 대화")
+        if verdict['판단'] != '진행':
+            return {'role': 'assistant', 'text': verdict['답변']}
     runner = _StepRunner(tables)
     try:
-        return _run_turn(messages, user_text, tables, on_step, feedback, runner)
+        reply = _run_turn(messages, user_text, tables, on_step, feedback, runner)
     finally:
         runner.close()
+    reply['text'] = with_notice(reply['text'], verdict)
+    return reply
 
 
 def _run_turn(messages, user_text, tables, on_step, feedback, runner):
@@ -471,6 +482,10 @@ def _final_message(raw, steps, values, messages, audiences=None):
 
 if __name__ == "__main__":
     import json
+    import services.intent_gate as _gate
+
+    _verdicts = []   # 요청 판단: 따로 정하지 않으면 진행
+    _gate._ask = lambda prompt: _verdicts.pop(0) if _verdicts else '{"판단": "진행"}'
 
     ISOLATED = False  # 아래 흐름 테스트는 같은 프로세스에서(빠르게). 격리 프로세스는 마지막에 따로 실제로 띄워서 확인한다
     views = pd.DataFrame({
@@ -645,4 +660,19 @@ jul, aug = m['2026-07'], m['2026-08']
     recs = _table_records(pd.DataFrame({'R고객번호': ['1', '2'], '월': pd.to_datetime(['2026-08-01', '2026-09-01']), 'MAU': [3, None]}))
     assert recs == [{'월': '2026-08-01', 'MAU': 3.0}, {'월': '2026-09-01', 'MAU': None}], recs
     json.dumps(recs)
+    # 요청 판단: 거절·되묻기·안내는 계산(AI 호출) 없이 그 답만 돌려주고, 비교 피드백과 gate=False는 판단을 거치지 않으며, 진행의 '주의'는 답 끝에 붙는다
+    globals()['generate_code_analyst_step'] = lambda prompt: (_ for _ in ()).throw(AssertionError("계산을 시작하면 안 된다"))
+    _verdicts.append('{"판단": "안내", "답변": "분석 탭에서는 시청 데이터로 MAU, 재방문율 같은 것을 계산해요. 예: 6월 SO별 MAU"}')
+    hello = run_analyst_turn([], "안녕 뭐 할 수 있어?", tables)
+    assert hello['text'].startswith("분석 탭에서는") and 'steps' not in hello
+    _verdicts.append('{"판단": "거절", "답변": "개인을 식별하는 정보는 알려드릴 수 없어요."}')
+    assert run_analyst_turn([], "고객 전화번호 알려줘", tables)['text'].startswith("개인을 식별")
+    _verdicts.append('{"판단": "거절", "답변": "x"}')
+    for kwargs in ({"feedback": True}, {"gate": False}):   # 판단을 거치지 않으면 AI 판단을 부르지 않으므로 계산이 시작돼 위의 AssertionError가 난다
+        try:
+            run_analyst_turn([], "몇 건?", tables, **kwargs)
+            raise SystemExit("계산이 시작돼야 함")
+        except AssertionError as e:
+            assert "계산을 시작" in str(e)
+    _verdicts.clear()
     print("code_analyst self-check OK")

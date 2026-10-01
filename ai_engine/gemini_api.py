@@ -6,7 +6,7 @@ from config import GEMINI_API_KEY
 from prompts.target_chat_prompt import get_target_chat_prompt, get_target_reasoning_prompt, get_segment_insight_prompt
 from prompts.push_prompt import get_push_prompt, get_sms_prompt
 from prompts.analysis_chat_prompt import get_pivot_insight_prompt
-from prompts.report_prompt import get_report_prompt
+from prompts.report_prompt import get_report_prompt, get_report_free_prompt
 
 _http_session = requests.Session()
 
@@ -232,6 +232,14 @@ def read_file_text(data, mime_type):
               "표는 한 행을 한 줄에 '값 | 값 | 값' 형태로 옮기고, 목록과 들여쓰기 구조는 유지해. "
               "글자가 거의 없는 사진이면 보이는 것을 사실만 짧게 설명해. 인사말이나 설명 없이 옮긴 내용만 출력해.")
     return _call_gemini_api(prompt, temperature=0.1, files=[(mime_type, base64.b64encode(data).decode("ascii"))])
+
+def assess_request(prompt):
+    """🌟 요청 판단(services/intent_gate.py): 질문의 뜻·의도를 판단한 JSON 글. 결정적으로 답하도록 온도 0. 실패하면 ⚠️ 문구."""
+    return _call_gemini_api(prompt, temperature=0.0)
+
+def generate_report_free(chat_history, so_reports_str="", draft_str=""):
+    prompt = get_report_free_prompt(_format_chat_history(chat_history), so_reports_str, draft_str)
+    return _call_gemini_api(prompt, temperature=0.4)
 
 def generate_report_reply(chat_history, profile_context_str, so_reports_str="", draft_str=""):
     chat_history_str = _format_chat_history(chat_history)

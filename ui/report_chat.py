@@ -138,7 +138,9 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
             "안녕하세요! 활동 보고서 글을 붙여넣거나, 알마인드·엑셀·워드·한글·CSV·텍스트·사진·PDF 파일을 올려 주세요. "
             "올린 자료를 읽고 트리로 정리해 두었다가, '올린 자료를 종합해서 요약해줘', '중복되는 건 묶어서 한눈에 보게 취합해줘', "
             "'짬짬반장이랑 조회수 위주로 묶으면 어때?'처럼 말씀하시면 분석해서 취합·요약해 드려요. "
-            "예시를 보며 구성을 대화로 다듬은 뒤 최종 알마인드 파일 한 개로 받으실 수 있어요. 원문의 링크·수치는 그대로 지키고, 자료를 추가하면 이어서 반영해요."
+            "예시를 보며 구성을 대화로 다듬은 뒤 최종 알마인드 파일 한 개로 받으실 수 있어요. 원문의 링크·수치는 그대로 지키고, 자료를 추가하면 이어서 반영해요. "
+            "알마인드 정리 말고도 올린 자료로 하고 싶은 일은 편하게 말씀해 주세요. 예: '이 내용에 대해 피드백해줘', '빠진 SO나 항목 찾아줘', "
+            "'SO별 조회수를 비교해줘', '임원 보고용 메일 초안 써줘', '발표 대본으로 바꿔줘'."
         )
         render_message("assistant", greeting, animate=st.session_state.get('report_greet_stream_pending', False))
         st.session_state.report_greet_stream_pending = False
@@ -160,7 +162,10 @@ def render_report_chat(profile_df, db_audience=None, db_content=None):
         render_chart_card(turn.get("chart"), f"report_chart_{i}")
 
         if turn.get("missing"):  # 대조에서 다시 정리해도 남은 문제 - 숨기지 않고 알린다
-            if turn.get("missing_kind") == "취합안":
+            if turn.get("missing_kind") == "자유":
+                st.warning("답변에 나온 다음 숫자·링크는 올린 자료에서 확인되지 않아요. AI가 계산했거나 잘못 썼을 수 있으니 확인해 주세요: "
+                           + ", ".join(turn["missing"][:12]), icon=":material/warning:")
+            elif turn.get("missing_kind") == "취합안":
                 st.warning("취합안에서 확인이 필요한 항목이에요(SO 보고서에 없는 링크·숫자, 이전 안에서 빠진 값, 요청과 다른 구성). 최종본에 넣기 전에 확인해 주세요: "
                            + ", ".join(turn["missing"][:12]), icon=":material/warning:")
             else:

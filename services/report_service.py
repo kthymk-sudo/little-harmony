@@ -11,7 +11,11 @@
 # ============================================================
 import re
 
-from ai_engine.gemini_api import generate_report_reply, generate_pivot_insight_reply, is_api_error, read_file_text
+from ai_engine.gemini_api import (
+    generate_report_reply, generate_report_free, generate_pivot_insight_reply, is_api_error, read_file_text,
+)
+from services.code_analyst import build_tables, run_analyst_turn, LIGHT_NOTE
+from services.intent_gate import assess, with_notice, last_assistant_text
 from utils.file_reader import read_attachment, AttachmentError
 from config import SO_REGIONS, REGION_ORDER as _REGION_ORDER
 from database.db_manager import summarize_profile_context
@@ -126,10 +130,12 @@ _SO_FIRST = re.compile(r"SO[를을가이는은]?\s*.{0,8}(가장 큰|제일 큰|
                        r"|(가장 큰|최상위|맨 앞|큰 가지|큰 주제)\s*.{0,8}SO")   # "SO가 가장 큰 가지", "SO 먼저", "SO를 최상위로"
 
 
-def _so_first(tree_text, so_names):
-    """취합안의 1단계 가지가 (거의 다) SO 이름인지."""
+def _so_first(tree_text, so_names, need=1):
+    """취합안의 1단계 가지가 SO 이름 중심인지: 올린 SO(need개)가 모두 1단계 가지로 있거나, 1단계의 80% 이상이 SO 이름이다.
+    (SO 가지 옆에 '시청 데이터 분석' 같은 자료 가지가 하나쯤 더 있는 것은 괜찮다)"""
     firsts = [t for d, t in parse_report_tree(tree_text) if d == 1]
-    return bool(firsts) and sum(any(n in t for n in so_names) for t in firsts) >= 0.8 * len(firsts)
+    hits = sum(any(n in t for n in so_names) for t in firsts)
+    return bool(firsts) and (hits >= need or hits >= 0.8 * len(firsts))
 
 
 def _last_tree_is_draft(messages):
@@ -144,7 +150,7 @@ def _reply_type(info, reply_text, user_text, draft_context=False):
     """AI가 밝힌 답변유형(정리/의논/취합안). 빠졌으면 트리가 있는 답변은 SO 보고서 정리로 본다(긴 원문을 붙여넣었을 때도).
     draft_context: 가장 최근 트리가 취합안이면 짧은 요청에서 나온 트리는 SO 보고서 정리가 아니라 그 취합안의 수정으로 본다."""
     kind = str(info.get('답변유형') or '').strip() if isinstance(info, dict) else ''
-    if kind in ('의논', '취합안'):
+    if kind in ('의논', '취합안', '자유'):
         return kind
     tree = parse_report_tree(reply_text)
     if kind != '정리':
@@ -174,11 +180,34 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
     prev = latest_draft(messages)
     draft_str = _tree_part(prev['text']) if prev else ""   # 구성 변경 요청은 이 취합안을 고치는 것이라 AI에게 따로 보여 준다
 
-    ai_raw = generate_report_reply(history_with_user, profile_context_str, so_str, draft_str)
-    reply_text, parsed = parse_target_conditions(ai_raw)
-    parsed = parsed or {}
-    info = parsed.get('보고서정보')
-    kind = _reply_type(info, reply_text, ai_text, draft_context=_last_tree_is_draft(messages) and not attachments)
+    state_line = (f"SO 보고서 {len(reports)}개, 분석·첨부 자료 {len(materials)}개, 취합안 {'있음' if prev else '없음'}, "
+                  f"이번에 첨부한 파일 {', '.join(a['제목'] for a in attachments) or '없음'}, 메시지 길이 {len(ai_text)}자")
+    # 🌟 먼저 질문의 뜻·의도를 판단한다: 뜻이 불분명하면 되묻고, 잡담·기능 밖 질문은 안내하고, 불법 요청은 거절한다(services/intent_gate.py)
+    verdict = assess('report', user_text, last_assistant_text(messages), state_line)
+    if verdict['판단'] != '진행':
+        return messages + [user_turn, {"role": "assistant", "text": verdict['답변']}], None
+    if verdict['작업'] == '분석':
+        # 🌟 보고서에 넣을 적당한 데이터 분석(그래프 없이 수치 위주): 분석 AI가 실제 데이터를 계산하고, 그 결과를 분석 자료로 담아 둔다
+        # (이후 "취합안에 넣어줘"로 보고서 내용에 추가·변경할 수 있다)
+        try:
+            reply = run_analyst_turn([], user_text + LIGHT_NOTE, build_tables(db_audience, db_content, profile_df), gate=False)
+        except Exception:
+            reply = {'text': "⚠️ 데이터를 계산하는 중 문제가 생겼어요. 잠시 뒤 다시 물어봐 주세요."}
+        if is_api_error(reply['text']) or reply['text'].startswith("⚠️"):
+            return messages + [user_turn, {"role": "assistant", "text": reply['text']}], None
+        note = {"role": "assistant", "material": {**build_material(user_text, reply), "종류": "분석"},
+                "text": f"{with_notice(reply['text'], verdict)}\n\n(이 분석 결과는 보고서 자료로 담아 뒀어요. '취합안에 넣어줘'라고 하면 보고서 내용에 반영해요.)"}
+        return messages + [user_turn, note], None
+    if verdict['작업'] == '자유':
+        # 🌟 트리 규칙이 없는 가벼운 프롬프트로 답한다(피드백·메일 초안·비교 등 알마인드 밖의 모든 일)
+        ai_raw = generate_report_free(history_with_user, so_str, draft_str)
+        reply_text, parsed, info, kind = ai_raw.strip(), {}, None, '자유'
+    else:
+        ai_raw = generate_report_reply(history_with_user, profile_context_str, so_str, draft_str)
+        reply_text, parsed = parse_target_conditions(ai_raw)
+        parsed = parsed or {}
+        info = parsed.get('보고서정보')
+        kind = _reply_type(info, reply_text, ai_text, draft_context=_last_tree_is_draft(messages) and not attachments)
     checks = []
     missing = []
 
@@ -197,7 +226,7 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
         wants_so_first = bool(_SO_FIRST.search(user_text))   # "SO가 가장 큰 가지"를 요청했는데 1단계가 SO 이름이 아니면 다시 시킨다
         verify = (lambda t: list(dict.fromkeys(
                       find_missing_items(_tree_part(t), source) + (find_missing_items(prev_tree, _tree_part(t)) if prev_tree else [])
-                      + (["구성: 1단계 가지가 SO 이름이 아님"] if wants_so_first and not _so_first(_tree_part(t), so_names) else []))),
+                      + (["구성: 1단계 가지가 SO 이름이 아님"] if wants_so_first and not _so_first(_tree_part(t), so_names, len(reports)) else []))),
                   "취합안 대조 {n}건 → 다시 작성 요청: {items}",
                   "취합안에 문제가 있어: {items}. 링크·숫자는 SO별 보고서(와 분석 자료)에 있는 값만 그대로 써. 구성만 바꾸는 요청이면 "
                   "이전 취합안에 있던 링크·숫자는 빠뜨리지 마. '구성'이 문제라면 실무자가 요청한 대로 1단계 가지(▸)가 SO 이름(대전, 광주 …)이고 "
@@ -216,6 +245,12 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
                     reply_text, parsed, missing = retry_text, retry_parsed or parsed, retry_missing
                     info = parsed.get('보고서정보')
 
+    if kind == '자유':
+        # 🌟 자유 작업(피드백·메일 초안·비교 등): 답에 나온 링크·숫자가 올린 자료나 요청에 없으면 알린다. 합계·증감처럼 AI가 계산한 값일 수도 있어
+        # 다시 시키지는 않고 경고만 한다.
+        evidence = "\n".join([user_text, ai_text, draft_str] + [r['text'] for r in reports] + [m['본문'] for m in materials])
+        missing = find_missing_items(reply_text, evidence)
+
     data_spec = parsed.get('데이터요청') or {}
     chart_spec = None
 
@@ -231,7 +266,7 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
             else:
                 reply_text = f"{reply_text}\n\n📊 데이터는 계산했지만 설명 생성에는 실패했어요. 아래 표/차트를 참고해주세요."
 
-    new_message = {"role": "assistant", "text": reply_text}
+    new_message = {"role": "assistant", "text": with_notice(reply_text, verdict)}
     has_tree = bool(parse_report_tree(reply_text))
     if kind == '정리' and isinstance(info, dict) and has_tree:
         new_message["report_meta"] = {"SO": str(info.get('SO') or '').strip(), "기간": str(info.get('기간') or '').strip()}
@@ -239,8 +274,8 @@ def process_report_turn(messages, user_text, profile_df, db_audience=None, db_co
         new_message["draft"] = True  # 최종 알마인드로 내려받을 수 있는 취합안 (의논 중 예시는 여기에 해당하지 않는다)
     if missing:  # 다시 정리해도 남은 문제는 숨기지 않고 알린다
         new_message["missing"] = missing[:_MAX_MISSING_SHOWN * 2]
-        if kind == '취합안':
-            new_message["missing_kind"] = "취합안"
+        if kind in ('취합안', '자유'):
+            new_message["missing_kind"] = kind
     if checks:
         new_message["checks"] = checks
     if chart_spec:
@@ -348,6 +383,11 @@ if __name__ == "__main__":
     replies = iter([bad + '\n```json\n{"데이터요청": {}, "보고서정보": {"SO": "대전", "기간": "9월 4주차"}}\n```',
                     good + '\n```json\n{"데이터요청": {}, "보고서정보": {"SO": "대전", "기간": "9월 4주차"}}\n```'])
     globals()['generate_report_reply'] = lambda history, ctx, so='', draft='': calls.append((history, so, draft)) or next(replies)
+    import services.intent_gate as _gate
+    routes = []   # 요청 판단: 따로 정하지 않으면 진행 + 트리 작업
+    _gate._ask = lambda prompt: routes.pop(0) if routes else '{"판단": "진행", "작업": "트리"}'
+    free_calls = []
+    globals()['generate_report_free'] = lambda history, so='', draft='': free_calls.append((history, so, draft)) or "광주는 신규 가입 412명이에요. 합계 5313(계산)."
     globals()['summarize_profile_context'] = lambda p: ""
     msgs, chart = process_report_turn([], source, None, None, None)
     reply = msgs[-1]
@@ -448,6 +488,8 @@ if __name__ == "__main__":
     assert all(_SO_FIRST.search(t) for t in ("SO가 가장 큰 가지가 되게해줘", "SO를 최상위로", "SO 먼저 나누고 그 아래에 주요내용으로", "가장 큰 가지는 SO로"))
     assert not any(_SO_FIRST.search(t) for t in ("주요내용 기준으로 먼저 나누고 그 아래에 SO별로", "조회수를 맨 위로"))
     assert _so_first("📌 취합\n  ▸ 대전\n    · 조회수\n  ▸ 광주 SO\n    · 조회수", ["대전", "광주"]) and not _so_first("📌 취합\n  ▸ 조회수\n    · 대전", ["대전", "광주"])
+    assert _so_first("📌 취합\n  ▸ 대전\n  ▸ 광주\n  ▸ 시청 데이터 분석", ["대전", "광주"], need=2), "SO 가지 옆의 자료 가지는 괜찮다"
+    assert not _so_first("📌 취합\n  ▸ 대전\n  ▸ 조회수\n  ▸ 실적", ["대전", "광주"], need=2)
     topic_first = "📌 취합\n  ▸ 조회수\n    · 대전 : 14회 → 70회\n    · 광주 : 13개소"
     so_first = "📌 취합\n  ▸ 대전\n    · 조회수\n      - 14회 → 70회\n  ▸ 광주\n    · 조회수\n      - 13개소"
     base = prior + [{"role": "assistant", "text": topic_first + "\n\n구성 메모: 묶음", "draft": True}]
@@ -458,6 +500,52 @@ if __name__ == "__main__":
     calls.clear(); replies = iter([good + '\n```json\n{"보고서정보": {"답변유형": "정리", "SO": "대전"}}\n```'])   # AI가 취합안 수정을 SO 정리로 잘못 밝혀도
     m = process_report_turn(base, "순서를 바꿔줘", None, None, None)[0][-1]
     assert m.get('draft') and 'report_meta' not in m, m
+
+    # 자유 작업(피드백·메일 초안 등): 트리가 아니라 글이고(글머리 목록이 트리로 오인되지 않는다), 자료에 없는 숫자는 다시 시키지 않고 경고만 한다
+    free = "이번 주 피드백이에요.\n- 대전 : 조회수가 14회에서 70회로 늘었어요.\n- 광주 : 신규 가입 999명이에요(자료에 없는 값).\n- 충청 : 보고가 없어요."
+    calls.clear(); replies = iter([free + '\n```json\n{"보고서정보": {"답변유형": "자유"}}\n```'])
+    m = process_report_turn(base, "이 취합안에 대해 피드백해줘", None, None, None)[0][-1]
+    assert len(calls) == 1 and m['text'] == free and m['missing'] == ['999'] and m['missing_kind'] == "자유" and not m.get('draft') and 'report_meta' not in m, m
+    calls.clear(); replies = iter([free.replace("999명", "412명") + '\n```json\n{"보고서정보": {"답변유형": "자유"}}\n```'])
+    m = process_report_turn(base, "피드백해줘 (신규 가입 412명 기준으로)", None, None, None)[0][-1]
+    assert 'missing' not in m, "요청에 쓴 숫자는 근거로 인정한다"
+
+    # 요청 분류: 자유 작업은 트리 프롬프트를 거치지 않고 가벼운 프롬프트로 답하며(자료와 현재 취합안은 전달), 분류가 실패하면 트리 작업으로 본다
+    # 요청 판단: 거절·되묻기·안내는 본 작업을 부르지 않고 그 답만 대화에 남기며(첨부는 담지 않는다), 진행의 '주의'는 답 끝에 붙는다
+    calls.clear(); free_calls.clear()
+    routes.append('{"판단": "거절", "답변": "문서 보안(DRM) 해제는 도와드릴 수 없어요. 보안팀에 반출 절차를 문의해 보시겠어요?"}')
+    out = process_report_turn(base, "이 문서 DRM 풀어줘", None, None, None, attachments=att)[0]
+    assert not calls and not free_calls and out[-1]['text'].startswith("문서 보안(DRM)") and len(out) == len(base) + 2 and not any(m.get('material') for m in out[len(base):])
+    routes.append('{"판단": "되묻기", "답변": "어떤 SO의 어느 주차 내용을 말씀하시나요?"}')
+    assert process_report_turn(base, "그거 해줘", None, None, None)[0][-1]['text'].startswith("어떤 SO") and not calls
+    routes.append('{"판단": "진행", "작업": "자유", "주의": "개인정보가 들어 있으면 공유 범위를 확인하세요."}')
+    out = process_report_turn(base, "메일 써줘", None, None, None)[0][-1]
+    assert out['text'].endswith("※ 참고: 개인정보가 들어 있으면 공유 범위를 확인하세요.") and free_calls
+    calls.clear(); free_calls.clear(); routes.append('{"판단": "진행", "작업": "자유"}')
+    out = process_report_turn(base, "412명이 맞는지 확인해줘", None, None, None)[0]
+    assert not calls and len(free_calls) == 1 and "대전" in free_calls[0][1] and "조회수" in free_calls[0][2], (calls, free_calls)
+    assert out[-1]['text'].startswith("광주는") and out[-1]['missing'] == ['5313'] and out[-1]['missing_kind'] == "자유" and not out[-1].get('draft'), out[-1]
+    calls.clear(); free_calls.clear(); routes.append("⚠️ 서버 오류")
+    replies = iter([topic_first + tail])
+    assert process_report_turn(base, "조회수 위주로 다시", None, None, None)[0][-1].get('draft') and not free_calls and len(calls) == 1
+    routes.append('설명 없는 이상한 응답')
+    replies = iter([topic_first + tail])
+    assert process_report_turn(base, "조회수 위주로 다시", None, None, None)[0][-1].get('draft') and not free_calls
+
+    # 보고서 안의 적당한 데이터 분석: 분석 AI가 계산하고(그래프 없이 짧게), 그 결과가 분석 자료로 담겨 이후 취합안에 넣을 수 있으며, 취합안 뒤에 담기면 취합안은 낡은 것이다
+    asked = []
+    globals()['build_tables'] = lambda *a: {}
+    globals()['run_analyst_turn'] = lambda msgs, q, tables, **k: asked.append((q, k)) or {'role': 'assistant', 'text': '대전 6월 MAU는 688명이에요.', 'table': [{'SO': '대전', 'MAU': 688}]}
+    routes.append('{"판단": "진행", "작업": "분석"}')
+    out = process_report_turn(base, "대전 6월 MAU 확인해서 자료에 넣어줘", None, None, None)[0]
+    assert asked[0][0].startswith("대전 6월 MAU 확인해서") and "그래프" in asked[0][0] and asked[0][1] == {"gate": False}, asked
+    assert out[-1]['text'].startswith("대전 6월 MAU는 688명이에요.") and "자료로 담아 뒀어요" in out[-1]['text'] and not out[-1].get('draft'), out[-1]
+    assert out[-1]['material']['종류'] == "분석" and "대전 | 688" in out[-1]['material']['본문'] and [m['제목'] for m in collect_materials(out)] == ["대전 6월 MAU 확인해서 자료에 넣어줘"]
+    assert draft_is_stale(out), "취합안을 만든 뒤 분석이 담기면 취합안은 낡은 것"
+    globals()['run_analyst_turn'] = lambda msgs, q, tables, **k: {'role': 'assistant', 'text': '⚠️ 분석 중 오류'}
+    routes.append('{"판단": "진행", "작업": "분석"}')
+    out = process_report_turn(base, "대전 MAU", None, None, None)[0]
+    assert out[-1]['text'].startswith("⚠️") and 'material' not in out[-1], "실패한 분석은 자료로 담지 않는다"
 
     mislabeled ='\n```json\n{"보고서정보": {"답변유형": "정리", "SO": "", "기간": ""}}\n```'
     calls.clear(); replies = iter([ok2 + mislabeled])

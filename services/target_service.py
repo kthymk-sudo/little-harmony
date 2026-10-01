@@ -10,9 +10,10 @@ from database.db_manager import (
     summarize_profile_context, summarize_segment_insight, format_segment_insight_reply,
     summarize_content_ranking, format_content_ranking_reply,
     summarize_group_breakdown, format_group_breakdown_reply,
-    _normalize_field_name, describe_term_matches, describe_period_warnings, data_period_line,
+    _normalize_field_name, describe_term_matches, describe_period_warnings, data_period_line, format_conditions_line,
 )
-from services.code_analyst import build_tables, run_analyst_turn
+from services.code_analyst import build_tables, run_analyst_turn, LIGHT_NOTE
+from services.intent_gate import assess, with_notice, last_assistant_text
 from utils.response_parser import parse_target_conditions
 from utils.naver_search import search_term_meaning
 
@@ -22,9 +23,9 @@ def _answer_with_analyst(question, conditions, profile_df, db_audience, db_conte
     계산해 답한다. 지금 잡고 있는 타겟 조건은 참고로만 알려주고, 실무자가 그 집단을 말했을 때만 좁혀 보게 한다."""
     visible = {k: v for k, v in (conditions or {}).items() if not k.startswith('__')}
     if visible:
-        question += f"\n(참고: 지금 대화 중인 타겟 조건은 {json.dumps(visible, ensure_ascii=False)}예요. 질문이 이 집단을 가리킬 때만 그 조건으로 좁혀 계산해.)"
+        question += f"\n(참고: 지금 대화 중인 타겟 조건은 {json.dumps(visible, ensure_ascii=False)}예요. SO 값(대전·광주 등)은 8개 권역 이름이라 'SO권역' 기준으로 맞춰. 질문이 이 집단을 가리킬 때만 그 조건으로 좁혀 계산해.)"
     try:
-        reply = run_analyst_turn([], question, build_tables(db_audience, db_content, profile_df))
+        reply = run_analyst_turn([], question + LIGHT_NOTE, build_tables(db_audience, db_content, profile_df), gate=False)
     except Exception:  # 분석이 실패해도 타겟팅 대화는 계속되게
         return "분석 중 문제가 생겼어요. 데이터 분석 탭에서 같은 질문을 다시 해보시겠어요?"
     if is_api_error(reply['text']):
@@ -35,6 +36,10 @@ def _answer_with_analyst(question, conditions, profile_df, db_audience, db_conte
 def process_target_turn(messages, conditions, user_text, profile_df, db_audience=None, db_content=None):
     """타겟 설정 대화 한 턴 처리 (Streamlit 비의존 - 단위 테스트 가능)."""
     history_with_user = messages + [{"role": "user", "text": user_text}]
+    # 🌟 먼저 질문의 뜻·의도를 판단한다: 뜻이 불분명하면 되묻고, 잡담·기능 밖 질문은 안내하고, 불법 요청은 거절한다(조건은 그대로)
+    verdict = assess('targeting', user_text, last_assistant_text(messages), f"지금까지 잡은 조건: {format_conditions_line(conditions)}")
+    if verdict['판단'] != '진행':
+        return history_with_user + [{"role": "assistant", "text": verdict['답변']}], conditions
     profile_context_str = summarize_profile_context(profile_df) + "\n" + data_period_line(db_audience)
     # '__' 접두사 키(분석 탭에서 가져온 고객번호 목록 등)는 내부용이라 AI에게는 보내지 않는다
     visible_conditions = {k: v for k, v in (conditions or {}).items() if not k.startswith('__')}
@@ -195,23 +200,39 @@ def process_target_turn(messages, conditions, user_text, profile_df, db_audience
         if notes:
             reply_text = reply_text.rstrip() + "\n\n[참고]\n· " + "\n· ".join(notes)
 
-    new_messages = history_with_user + [{"role": "assistant", "text": reply_text}]
+    new_messages = history_with_user + [{"role": "assistant", "text": with_notice(reply_text, verdict)}]
     return new_messages, merged_conditions
 
 
 if __name__ == "__main__":
     # 정해진 질문 유형으로 답할 수 없는 데이터 질문은 분석가에게 넘겨 답하고, 타겟 조건은 그대로 두며, 분석이 실패해도 대화는 계속된다
     tail = '\n```json\n{"분석질문": "6월 재방문율은?", "질문조건": {}}\n```'
+    import services.intent_gate as _gate
+    verdicts = []   # 요청 판단: 따로 정하지 않으면 진행
+    _gate._ask = lambda prompt: verdicts.pop(0) if verdicts else '{"판단": "진행"}'
     globals()['generate_target_chat_reply'] = lambda *a, **k: "분석해볼게요." + tail
     globals()['summarize_profile_context'] = lambda p: ""
     globals()['build_tables'] = lambda *a: {}
     asked = []
-    globals()['run_analyst_turn'] = lambda msgs, q, tables: asked.append(q) or {'role': 'assistant', 'text': '재방문율은 40%예요.'}
+    globals()['run_analyst_turn'] = lambda msgs, q, tables, **k: asked.append(q) or {'role': 'assistant', 'text': '재방문율은 40%예요.'}
     msgs, cond = process_target_turn([], {"성별": "여자"}, "6월 재방문율은?", None)
     assert "재방문율은 40%" in msgs[-1]['text'] and cond == {"성별": "여자"} and "[참고]" not in msgs[-1]['text'], msgs[-1]
     assert asked[0].startswith("6월 재방문율은?") and "성별" in asked[0]
 
-    def _boom(*a):
+    # 요청 판단: 거절·되묻기는 조건을 그대로 두고 본 작업(AI 호출)을 하지 않으며, 진행의 '주의'는 답 끝에 붙는다
+    def _no_call(*a, **k):
+        raise AssertionError("본 작업을 부르면 안 된다")
+    globals()['generate_target_chat_reply'] = _no_call
+    verdicts.append('{"판단": "거절", "답변": "수신 거부 고객에게는 광고를 보낼 수 없어요. 수신 동의 고객만 뽑아 드릴까요?"}')
+    msgs, cond = process_target_turn([{"role": "user", "text": "a"}], {"성별": "여자"}, "수신 거부한 사람들한테도 보내자", None)
+    assert msgs[-1]['text'].startswith("수신 거부 고객에게는") and cond == {"성별": "여자"} and len(msgs) == 3
+    verdicts.append('{"판단": "되묻기", "답변": "어떤 시청자분들께 보내고 싶으세요?"}')
+    assert process_target_turn([], {}, "ㅇㅇ", None)[0][-1]['text'].startswith("어떤 시청자분들")
+    globals()['generate_target_chat_reply'] = lambda *a, **k: "분석해볼게요." + tail
+    verdicts.append('{"판단": "진행", "주의": "광고성 문자는 (광고) 표기가 필요해요."}')
+    assert process_target_turn([], {}, "6월 재방문율은?", None)[0][-1]['text'].endswith("※ 참고: 광고성 문자는 (광고) 표기가 필요해요.")
+
+    def _boom(*a, **k):
         raise RuntimeError("x")
     globals()['run_analyst_turn'] = _boom
     assert "분석 중 문제" in process_target_turn([], {}, "x", None)[0][-1]['text']
