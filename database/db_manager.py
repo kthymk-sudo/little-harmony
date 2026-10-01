@@ -16,10 +16,10 @@ from database.upsert import upsert_to_db
 from database.loader import load_history_period, load_content, has_history_data
 from database.audience import (
     build_audience_profile, summarize_profile_context,
-    summarize_segment_insight, format_segment_insight_reply, apply_target_conditions,
-    summarize_content_ranking, format_content_ranking_reply,
-    summarize_group_breakdown, format_group_breakdown_reply,
-    _filter_by_conditions, _normalize_field_name, describe_term_matches,
+    summarize_segment_insight, apply_target_conditions,
+    summarize_content_ranking,
+    summarize_group_breakdown,
+    _normalize_field_name, describe_term_matches,
     describe_period_warnings, data_period_line,
 )
 from database.formatting import format_conditions_line, format_target_summary

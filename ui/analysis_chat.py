@@ -14,7 +14,7 @@ from config import start_new_conversation
 from database.db_manager import apply_target_conditions, format_target_summary, save_simple_conversation
 from services.analysis_service import chart_spec_from
 from services.report_service import build_material
-from services.code_analyst import build_tables, run_analyst_turn, is_feedback_request, FEEDBACK_REQUEST_TEXT
+from services.code_analyst import build_tables, run_analyst_turn, FEEDBACK_REQUEST_TEXT
 from ui import job_runner
 from ui.chart_render import render_chart_card
 from ui.chat_styles import inject_chat_css, render_message
@@ -90,7 +90,7 @@ def _render_actions(i, turn, profile_df, db_audience):
                 autosave_simple('analysis')
                 st.rerun()
             if st.button("전체와 비교 피드백", width="content", key=f"analysis_feedback_{i}", icon=":material/insights:"):
-                _ask(FEEDBACK_REQUEST_TEXT, feedback=True)
+                _ask(FEEDBACK_REQUEST_TEXT)
         if turn.get("audience"):
             info = turn["audience"]
             if st.button(f"타겟팅으로 보내기 ({info['count']:,}명)", width="content", key=f"analysis_to_target_{i}",
@@ -101,10 +101,9 @@ def _render_actions(i, turn, profile_df, db_audience):
                 _send_to_report(i, turn)
 
 
-def _ask(user_text, feedback=False):
+def _ask(user_text):
     st.session_state.analysis_messages.append({"role": "user", "text": user_text})
     st.session_state.analysis_pending_user_text = user_text
-    st.session_state.analysis_pending_feedback = feedback
     st.rerun()
 
 
@@ -137,7 +136,6 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
     conv_id = st.session_state.analysis_current_conversation_id
     if st.session_state.get('analysis_pending_user_text'):
         pending = st.session_state.pop('analysis_pending_user_text')
-        feedback = st.session_state.pop('analysis_pending_feedback', False) or is_feedback_request(pending)
         # 🌟 분석은 백그라운드로 돈다 - 끝나기 전에 다른 탭·대화로 넘어가도 끊기지 않고 대화에 저장된다(ui/job_runner.py)
         base = list(st.session_state.analysis_messages)   # 방금 물은 사용자 말풍선까지 들어 있다
 
@@ -147,7 +145,7 @@ def render_analysis_chat(profile_df, db_audience=None, db_content=None):
 
             try:
                 tables = build_tables(db_audience, db_content, profile_df)
-                reply = run_analyst_turn(base[:-1], pending, tables, on_step=_on_step, feedback=feedback)
+                reply = run_analyst_turn(base[:-1], pending, tables, on_step=_on_step)
             except Exception as e:  # 예상 못한 오류가 나도 질문에 답이 남도록(화면 전체가 멈추지 않게)
                 reply = {"role": "assistant", "text": f"⚠️ 분석 중 오류가 생겼어요. 질문을 조금 바꿔서 다시 시도해주세요. ({type(e).__name__})"}
             return base + [reply]

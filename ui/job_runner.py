@@ -17,14 +17,12 @@ def start(key, work, persist=None, label="답변을 만드는 중..."):
     """work(job) -> 결과를 백그라운드로 시작한다. work와 persist 안에서는 st.session_state를 쓰면 안 된다(값을 미리 복사해 둘 것)."""
     ctx = get_script_run_ctx()
 
-    def wrap(run):
-        def inner():
-            if ctx is not None:
-                add_script_run_ctx(threading.current_thread(), ctx)   # 스레드 안에서 st.cache 등을 써도 경고가 나지 않게
-            return run()
-        return inner
+    def run(job):
+        if ctx is not None:
+            add_script_run_ctx(threading.current_thread(), ctx)   # 스레드 안에서 st.cache 등을 써도 경고가 나지 않게
+        return work(job)
 
-    background.submit(key, work, persist=persist, label=label, wrap=wrap)
+    background.submit(key, run, persist=persist, label=label)
 
 
 def wait_for(key):

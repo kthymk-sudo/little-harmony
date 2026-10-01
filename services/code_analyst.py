@@ -18,22 +18,18 @@ import numpy as np
 import pandas as pd
 
 from ai_engine.gemini_api import generate_code_analyst_step, is_api_error
-from prompts.code_analyst_prompt import get_code_analyst_prompt, FEEDBACK_INSTRUCTION
+from prompts.code_analyst_prompt import get_code_analyst_prompt
 from services import code_sandbox as sandbox
 from services.code_sandbox import check_code, SandboxSession, SandboxUnavailable
 from services.analysis_service import (
     _add_derived_columns, _with_content_attrs, _REGION_ORDER, _REGION_COLUMNS, _region_sort_key,
     CHART_TYPES, normalize_pivot_result,
 )
-from services.intent_gate import assess, with_notice, last_assistant_text
 from utils.response_parser import parse_target_conditions
 
 LIGHT_NOTE = "\n(타겟팅·보고서 화면에서 온 간단한 확인 질문이야: 계산은 평소처럼 정확하게 하고 위에 적힌 조건·기간·대상을 빠짐없이 적용해. 답은 필요한 수치만 짧게 하되 어떤 집단·기간을 기준으로 몇 명인지 밝혀. 그래프는 만들지 마.)"
 _MAX_STEPS = 6            # 코드 실행 최대 5번 + 마지막 답변
 _MAX_RETRIES = 3          # 형식이 틀리거나 결과를 지어낸 응답을 다시 요청하는 최대 횟수(턴 전체)
-_DEEP_QUESTION = re.compile(r'특이|원인|왜|이유|유입|영향|때문|요인')
-_DEEP_MIN_STEPS = 3       # 원인·특이사항 질문에 기대하는 최소 성공 계산 단계
-_MAX_NUDGES = 2           # 그래도 바로 답하려 하면 되돌려 보내는 최대 횟수
 _MAX_VERIFY_RETRIES = 2   # 실행 결과로 확인 안 되는 숫자가 있을 때 코드로 계산하게 되돌려 보내는 최대 횟수
 _TOTAL_ROW_LABELS = {'합계', '전체', '총계', '총합', '소계', 'total', 'Total', 'TOTAL', '전체 합계'}
 _TIMEOUT_SEC = 30
@@ -247,25 +243,12 @@ _FABRICATION_SIGNS = re.compile(
     rf"{_LOG_MARK}|\[\d+\s*단계\]|^\s*(코드|출력|결과|실행한 코드|print 출력|실행 오류)\s*:\s*$", re.MULTILINE
 )
 
-# 🌟 [버그 수정] "피드백 많은 콘텐츠 알려줘"처럼 "피드백"이라는 단어만 있어도 미시/거시 피드백으로 답하던 것을,
-# 전체와 비교한 피드백을 요청하는 표현일 때만 그렇게 하도록 좁혔다(버튼은 따로 확실히 지정).
-_FEEDBACK_REQUEST = re.compile(
-    r"(전체.{0,6}비교|비교.{0,6}전체).{0,12}(피드백|평가|시사점)"
-    r"|(피드백|평가|시사점).{0,6}(줘|해\s*줘|남겨|부탁|주세요|달라)"
-    r"|미시.{0,6}거시|거시.{0,6}미시"
-)
-
-
-def is_feedback_request(text):
-    return bool(_FEEDBACK_REQUEST.search(text or ""))
-
-
-def _invalid_reason(raw, has_code):
+def _invalid_reason(raw, has_code, executed=True):
     """AI 응답이 쓸 수 없는 이유(없으면 None). 실행하지 않은 결과를 지어내 적은 응답을 걸러낸다."""
     body = _CODE_BLOCK.sub('', raw)
     if _FABRICATION_SIGNS.search(body):
         return "실행하지 않은 코드 결과나 다음 단계를 네가 직접 적었어. 코드블록 하나만 쓰고 멈추거나, 실행 기록의 숫자로만 최종 답변을 써."
-    if not has_code and '```json' not in raw:
+    if not has_code and executed and '```json' not in raw:   # 계산한 뒤의 최종 답변만 JSON이 필요하다(되묻기·안내·거절은 글만)
         return "최종 답변 끝에 JSON 코드블록이 없어. 형식대로 다시 써."
     return None
 
@@ -314,45 +297,36 @@ class _StepRunner:
             self.session.close()
 
 
-def run_analyst_turn(messages, user_text, tables, on_step=None, feedback=False, gate=True):
+def run_analyst_turn(messages, user_text, tables, on_step=None):
     """한 턴 처리. 반환: 새 assistant 메시지 dict
        {'text', 'steps': [{'번호','설명','code','preview'|'error','printed'}], 'data'(그래프용, 선택), 'chart'(선택),
         'audience'(타겟팅으로 보낼 수 있는 집단, 선택)}
-    🌟 gate: 먼저 질문의 뜻·의도를 판단한다(되묻기·안내·거절은 계산 없이 그 답만). 이미 판단을 거친 질문(타겟팅에서 넘어온 것)과
-    시스템이 만든 비교 피드백 요청(feedback)은 다시 판단하지 않는다."""
-    verdict = {"판단": "진행", "주의": ""}
-    if gate and not feedback:
-        verdict = assess('analysis', user_text, last_assistant_text(messages), "시청 데이터 분석 대화")
-        if verdict['판단'] != '진행':
-            return {'role': 'assistant', 'text': verdict['답변']}
+    🌟 질문의 뜻 판단(되묻기·다른 탭 안내·거절)은 별도 호출 없이 이 분석가가 같은 대화 안에서 한다: 계산이 필요 없으면 코드 없이 글로만 답한다."""
     runner = _StepRunner(tables)
     try:
-        reply = _run_turn(messages, user_text, tables, on_step, feedback, runner)
+        return _run_turn(messages, user_text, tables, on_step, runner)
     finally:
         runner.close()
-    reply['text'] = with_notice(reply['text'], verdict)
-    return reply
 
 
-def _run_turn(messages, user_text, tables, on_step, feedback, runner):
+def _run_turn(messages, user_text, tables, on_step, runner):
     schema = describe_tables(tables)
     history = _history_str(messages)
     steps, values, audiences = [], {}, {}
     valid_ids = set(tables['고객']['R고객번호'].astype(str)) if '고객' in tables else None
-    correction, retries, nudges, verify_retries = "", 0, 0, 0
+    correction, retries, verify_retries = "", 0, 0
     checks = []  # 답변 검증 기록(지어낸 숫자 차단 등) - "계산 과정 보기"에 같이 보여준다
     unverified = []
     i = 0
     while i < _MAX_STEPS:
-        prompt = get_code_analyst_prompt(schema, history, user_text, _steps_str(steps), i == _MAX_STEPS - 1,
-                                         FEEDBACK_INSTRUCTION if feedback else "", correction)
+        prompt = get_code_analyst_prompt(schema, history, user_text, _steps_str(steps), i == _MAX_STEPS - 1, correction)
         raw = generate_code_analyst_step(prompt)
         if is_api_error(raw):
             return {'role': 'assistant', 'text': raw, 'steps': steps}
         code_match = _CODE_BLOCK.search(raw)
         has_code = bool(code_match) and i < _MAX_STEPS - 1
         # 코드 앞부분(할 일 설명)만 검사한다 - 코드블록 뒤에 지어낸 결과가 붙어 있어도 코드만 쓰고 나머지는 버린다
-        reason = _invalid_reason(raw[:code_match.end()] if has_code else raw, has_code)
+        reason = _invalid_reason(raw[:code_match.end()] if has_code else raw, has_code, executed=bool(steps))
         # "다시 해봐" 요청(nudge) - 무시해도 답변을 버릴 정도는 아니므로, 정해진 횟수를 넘기면 그 답변을 받는다
         nudge, nudge_label = None, ""
         unverified = []
@@ -368,14 +342,6 @@ def _run_turn(messages, user_text, tables, on_step, feedback, runner):
                          f"이번 응답은 최종 답변이 아니라 반드시 ```python 코드블록```이어야 해.")
             elif missing:
                 unverified = missing  # 그래도 안 되면 답변은 보여주되, 확인 안 된 숫자를 표시한다
-            elif (nudges < _MAX_NUDGES and _DEEP_QUESTION.search(user_text)
-                  and sum('preview' in s for s in steps) < _DEEP_MIN_STEPS):
-                # 원인·특이사항 질문인데 너무 일찍 끝내려 하면 더 파고들게 한다
-                nudges += 1
-                nudge_label = "더 파고들도록 다시 요청"
-                nudge = ("원인·특이사항을 묻는 질문인데 근거 계산이 부족해. 전월/다른 권역/전체와 비교해 튀는 곳을 찾고, "
-                         "그곳의 원인을 한 단계 더 파고드는 코드를 실행해(예: 신규 시청자가 처음 본 콘텐츠, 그 권역에서만 "
-                         "유독 많이 본 콘텐츠의 전체 대비 비중). 이번 응답은 최종 답변이 아니라 반드시 ```python 코드블록```이어야 해.")
         if reason and retries < _MAX_RETRIES:
             correction, retries = reason, retries + 1
             checks.append(f"다시 요청: {reason}")
@@ -431,6 +397,28 @@ def _run_turn(messages, user_text, tables, on_step, feedback, runner):
 _MAX_TABLE_ROWS, _MAX_TABLE_COLS = 2000, 30
 
 
+def lazy_tables(db_audience, db_content, profile_df):
+    """표(build_tables)를 처음 필요할 때 한 번만 만드는 함수. 시청 데이터가 없으면 None을 돌려준다."""
+    cache = []
+
+    def get():
+        if db_audience is None or db_content is None:
+            return None
+        if not cache:
+            cache.append(build_tables(db_audience, db_content, profile_df))
+        return cache[0]
+    return get
+
+
+def quick_check(tables, question):
+    """타겟팅·보고서의 간단한 수치 확인. 반환: (분석 답변 dict, None) 또는 (None, 실패 안내 글)."""
+    try:
+        reply = run_analyst_turn([], question + LIGHT_NOTE, tables)
+    except Exception:
+        return None, "데이터를 계산하는 중 문제가 생겼어. 잠시 뒤 다시 해 봐도 돼."
+    return (None, reply['text']) if is_api_error(reply.get('text', '')) else (reply, None)
+
+
 def _table_records(value):
     """🌟 [표 다운로드] 답변의 핵심 결과표를 대화에 함께 저장할 수 있는 형태로(고객번호 컬럼 제외, 크기 제한). 표가 아니면 None."""
     df = _as_frame(value)
@@ -482,10 +470,6 @@ def _final_message(raw, steps, values, messages, audiences=None):
 
 if __name__ == "__main__":
     import json
-    import services.intent_gate as _gate
-
-    _verdicts = []   # 요청 판단: 따로 정하지 않으면 진행
-    _gate._ask = lambda prompt: _verdicts.pop(0) if _verdicts else '{"판단": "진행"}'
 
     ISOLATED = False  # 아래 흐름 테스트는 같은 프로세스에서(빠르게). 격리 프로세스는 마지막에 따로 실제로 띄워서 확인한다
     views = pd.DataFrame({
@@ -601,16 +585,9 @@ jul, aug = m['2026-07'], m['2026-08']
              'unverified': ['1,514']}, {'role': 'assistant', 'text': "890명", 'steps': [{'preview': "대전,890", 'printed': ''}]}]
     assert ungrounded_numbers("대전 1,514명", _evidence_text(prev, [], "다시 알려줘")) == ['1,514']
     assert ungrounded_numbers("대전 890명", _evidence_text(prev, [], "다시 알려줘")) == []
-    # 오류 3: "피드백"이라는 단어만으로는 피드백 모드가 아니다
-    assert not is_feedback_request("피드백 많은 콘텐츠 알려줘") and not is_feedback_request("댓글 피드백이 많은 영상은?")
-    assert is_feedback_request("이거 전체랑 비교해서 피드백 줘") and is_feedback_request("미시 거시 관점으로 평가해줘")
-    assert is_feedback_request(FEEDBACK_REQUEST_TEXT) and is_feedback_request("피드백 해줘")
-    # 원인 질문인데 너무 일찍 끝내면 한 번 더 파고들게 하고, 그래도 끝내면 그 답변을 받는다
-    prompts_seen = []
-    replies = iter(["5건이에요.\n```json\n{\"그래프\": null}\n```"] * 3)
-    globals()['generate_code_analyst_step'] = lambda prompt: prompts_seen.append(prompt) or next(replies)
-    assert run_analyst_turn([], "왜 늘었어?", tables)['text'] == '5건이에요.' and '근거 계산이 부족' in prompts_seen[2]
-    assert len(prompts_seen) == 1 + _MAX_NUDGES
+    # 계산 없이 설명만 하는 답은 억지로 계산시키지 않는다
+    globals()['generate_code_analyst_step'] = lambda prompt: "아까 계산은 시청 기록 수를 센 거예요."
+    assert run_analyst_turn([], "왜 이 숫자가 나왔어?", tables)['text'] == "아까 계산은 시청 기록 수를 센 거예요."
     # 코드블록 뒤에 지어낸 결과가 붙어 와도 코드만 실행하고 나머지는 버린다
     replies = iter(["건수 계산\n```python\n결과 = len(시청)\n```\n출력:\n999", "5건이에요.\n```json\n{\"그래프\": null}\n```"])
     globals()['generate_code_analyst_step'] = lambda prompt: next(replies)
@@ -660,19 +637,10 @@ jul, aug = m['2026-07'], m['2026-08']
     recs = _table_records(pd.DataFrame({'R고객번호': ['1', '2'], '월': pd.to_datetime(['2026-08-01', '2026-09-01']), 'MAU': [3, None]}))
     assert recs == [{'월': '2026-08-01', 'MAU': 3.0}, {'월': '2026-09-01', 'MAU': None}], recs
     json.dumps(recs)
-    # 요청 판단: 거절·되묻기·안내는 계산(AI 호출) 없이 그 답만 돌려주고, 비교 피드백과 gate=False는 판단을 거치지 않으며, 진행의 '주의'는 답 끝에 붙는다
-    globals()['generate_code_analyst_step'] = lambda prompt: (_ for _ in ()).throw(AssertionError("계산을 시작하면 안 된다"))
-    _verdicts.append('{"판단": "안내", "답변": "분석 탭에서는 시청 데이터로 MAU, 재방문율 같은 것을 계산해요. 예: 6월 SO별 MAU"}')
-    hello = run_analyst_turn([], "안녕 뭐 할 수 있어?", tables)
-    assert hello['text'].startswith("분석 탭에서는") and 'steps' not in hello
-    _verdicts.append('{"판단": "거절", "답변": "개인을 식별하는 정보는 알려드릴 수 없어요."}')
-    assert run_analyst_turn([], "고객 전화번호 알려줘", tables)['text'].startswith("개인을 식별")
-    _verdicts.append('{"판단": "거절", "답변": "x"}')
-    for kwargs in ({"feedback": True}, {"gate": False}):   # 판단을 거치지 않으면 AI 판단을 부르지 않으므로 계산이 시작돼 위의 AssertionError가 난다
-        try:
-            run_analyst_turn([], "몇 건?", tables, **kwargs)
-            raise SystemExit("계산이 시작돼야 함")
-        except AssertionError as e:
-            assert "계산을 시작" in str(e)
-    _verdicts.clear()
+    # 계산 없이 답하는 응답(되묻기·안내·거절)은 코드·JSON 없이 글만으로도 받고, 계산한 뒤의 최종 답변은 JSON이 있어야 한다
+    globals()['generate_code_analyst_step'] = lambda prompt: "개인을 식별하는 정보는 알려드릴 수 없어요. 대신 집계된 분포를 보여드릴까요?"
+    refused = run_analyst_turn([], "고객 전화번호 알려줘", tables)
+    assert refused['text'].startswith("개인을 식별") and not refused['steps'] and 'data' not in refused
+    assert _invalid_reason("안녕하세요", False, executed=False) is None and _invalid_reason("5건이에요", False, executed=True)
+    assert "분석 탭" not in get_code_analyst_prompt("스키마", "(없음)", "질문", "(아직 없음)", False) and "'타겟팅 & 카피' 탭" in get_code_analyst_prompt("스키마", "(없음)", "질문", "(아직 없음)", False)
     print("code_analyst self-check OK")

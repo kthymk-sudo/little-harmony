@@ -3,10 +3,8 @@ import requests
 import time
 import streamlit as st
 from config import GEMINI_API_KEY
-from prompts.target_chat_prompt import get_target_chat_prompt, get_target_reasoning_prompt, get_segment_insight_prompt
+from prompts.target_chat_prompt import get_target_reasoning_prompt
 from prompts.push_prompt import get_push_prompt, get_sms_prompt
-from prompts.analysis_chat_prompt import get_pivot_insight_prompt
-from prompts.report_prompt import get_report_prompt, get_report_free_prompt
 
 _http_session = requests.Session()
 
@@ -92,42 +90,41 @@ def _discover_target_model():
     return target_model
 
 
-def _switch_model(target_model, prompt, temperature, files=None):
+def _switch_model(target_model, payload):
     """이 모델을 소진으로 표시하고 다른 모델로 다시 호출한다(한도 초과·서버 과부하·무응답 공통). 바꿀 모델이 없으면 None."""
     _mark_exhausted(target_model)
     _discover_target_model.clear()
     new_target_model = _discover_target_model()
     if new_target_model and (new_target_model != target_model) and not _is_still_exhausted(new_target_model):
-        return _call_gemini_api(prompt, temperature, files)
+        return _post_generate(payload)
     return None
 
 
-def _call_gemini_api(prompt, temperature=0.55, files=None):
-    """Google Gemini API 호출, 예외 처리, Timeout, 재시도를 모두 담당하는 코어 함수.
-    files: 함께 보낼 파일 [(mime_type, base64 문자열)] - 사진·PDF를 읽힐 때 쓴다."""
+def _post_generate(payload):
+    """Google Gemini generateContent 호출, 예외 처리, Timeout, 재시도, 모델 갈아타기를 모두 담당하는 코어 함수.
+    반환: ('ok', 응답 JSON) 또는 ('error', '⚠️ ...안내 문구')."""
     if GEMINI_API_KEY == "여기에_발급받으신_GEMINI_API_KEY를_붙여넣으세요" or not GEMINI_API_KEY:
-        return "⚠️ 시스템 은닉형 API 키가 설정되지 않았습니다. .env 또는 config 설정을 확인하세요."
+        return "error", "⚠️ 시스템 은닉형 API 키가 설정되지 않았습니다. .env 또는 config 설정을 확인하세요."
 
     if not (GEMINI_API_KEY.startswith("AIza") or GEMINI_API_KEY.startswith("AQ.")):
-        return "⚠️ 입력하신 API 키의 형식이 올바르지 않습니다."
+        return "error", "⚠️ 입력하신 API 키의 형식이 올바르지 않습니다."
 
     try:
         target_model = _discover_target_model()
-        parts = [{"text": prompt}] + [{"inline_data": {"mime_type": mime, "data": data}} for mime, data in (files or [])]
-        payload = {"contents": [{"parts": parts}], "generationConfig": {"temperature": temperature}}
 
-        # 🌟 [속도 최적화] 구글 서버가 아플 때 너무 오래 기다리지 않도록 재시도는 총 2번, 타임아웃은 20초.
+        # 🌟 [속도 최적화] 구글 서버가 아플 때 너무 오래 기다리지 않도록 재시도는 총 2번, 타임아웃은 20초(도구를 쓰는 대화는 길어서 40초).
+        timeout = 40 if payload.get("tools") else 20
         for attempt in range(2):
             first_try = attempt == 0
             url_generate = f"https://generativelanguage.googleapis.com/v1beta/{target_model}:generateContent?key={GEMINI_API_KEY}"
             try:
-                res_gen = _http_session.post(url_generate, headers={"Content-Type": "application/json"}, json=payload, timeout=20)
+                res_gen = _http_session.post(url_generate, headers={"Content-Type": "application/json"}, json=payload, timeout=timeout)
 
                 if res_gen.status_code == 200:
                     try:
-                        return res_gen.json()['candidates'][0]['content']['parts'][0]['text']
-                    except (KeyError, IndexError, ValueError):
-                        return "⚠️ 답변을 생성하지 못했습니다(안전 필터에 의해 차단됐을 수 있어요). 표현을 조금 바꿔 다시 시도해주세요."
+                        return "ok", res_gen.json()
+                    except ValueError:
+                        return "error", "⚠️ 답변을 생성하지 못했습니다. 잠시 뒤 다시 시도해주세요."
 
                 elif res_gen.status_code == 429:
                     if first_try:
@@ -138,67 +135,83 @@ def _call_gemini_api(prompt, temperature=0.55, files=None):
                             wait_s = (2 ** attempt) + 1
                         time.sleep(min(wait_s, 20))
                         continue
-                    switched = _switch_model(target_model, prompt, temperature, files)
-                    return switched if switched is not None else (
+                    switched = _switch_model(target_model, payload)
+                    return switched if switched is not None else ("error",
                         "⚠️ [모든 AI 모델 한도 초과] 현재 사용 가능한 모든 AI 모델의 일일 한도를 모두 소진했습니다. "
-                        "내일 다시 시도하시거나, Google AI Studio에서 결제 설정을 확인해주세요."
-                    )
+                        "내일 다시 시도하시거나, Google AI Studio에서 결제 설정을 확인해주세요.")
 
                 elif res_gen.status_code in [500, 503]:
                     if first_try:
                         time.sleep(2)
                         continue
                     # 🌟 [503 서버 과부하 우회] 구글 서버가 뻗었을 때도 즉시 다른 모델로 갈아탑니다.
-                    switched = _switch_model(target_model, prompt, temperature, files)
-                    return switched if switched is not None else (
-                        f"⚠️ [서버 과부하] 구글 AI 서버가 혼잡하여 다른 모델로 우회하려 했으나 모두 실패했습니다. (상태코드: {res_gen.status_code})"
-                    )
+                    switched = _switch_model(target_model, payload)
+                    return switched if switched is not None else ("error",
+                        f"⚠️ [서버 과부하] 구글 AI 서버가 혼잡하여 다른 모델로 우회하려 했으나 모두 실패했습니다. (상태코드: {res_gen.status_code})")
 
                 elif res_gen.status_code == 404:
                     _discover_target_model.clear()
                     if target_model != _LATEST_FLASH_ALIAS and first_try:
                         target_model = _LATEST_FLASH_ALIAS
                         continue
-                    return "⚠️ [모델 오류] 사용하려던 AI 모델을 찾을 수 없어 안전 모델로 자동 재시도 중 실패했습니다."
+                    return "error", "⚠️ [모델 오류] 사용하려던 AI 모델을 찾을 수 없어 안전 모델로 자동 재시도 중 실패했습니다."
 
                 else:
-                    return f"⚠️ API 요청 거부 ({res_gen.status_code}): {res_gen.text}"
+                    return "error", f"⚠️ API 요청 거부 ({res_gen.status_code}): {res_gen.text}"
 
             except requests.exceptions.RequestException as req_e:
                 if first_try:
                     time.sleep(2)
                     continue
                 # 🌟 [타임아웃 무응답 우회] 응답이 너무 오래 걸려도 버리고 다른 모델로 갈아탑니다.
-                switched = _switch_model(target_model, prompt, temperature, files)
-                return switched if switched is not None else f"⚠️ 네트워크 통신 오류(Timeout 등)가 지속되어 중지합니다: {str(req_e)}"
+                switched = _switch_model(target_model, payload)
+                return switched if switched is not None else ("error", f"⚠️ 네트워크 통신 오류(Timeout 등)가 지속되어 중지합니다: {str(req_e)}")
 
     except Exception as e:
-        return f"⚠️ 시스템 통신 중 치명적 오류 발생: {str(e)}"
+        return "error", f"⚠️ 시스템 통신 중 치명적 오류 발생: {str(e)}"
+    return "error", "⚠️ 답변을 받지 못했습니다. 잠시 뒤 다시 시도해주세요."
 
 
-def _format_chat_history(chat_history):
-    """[{'role': 'user'/'ai', 'text': '...'}] 리스트를 프롬프트에 넣을 문자열로 변환.
-    🌟 [에러 오염 방지] 과거 턴 중 API 실패로 인한 안내 문구(⚠️로 시작)는 실제 AI
-    발언이 아니므로, 다음 턴 프롬프트에 다시 섞여 들어가지 않도록 제외한다."""
-    if not chat_history:
-        return "(아직 대화 없음)"
-    lines = []
-    for turn in chat_history:
-        text = turn.get('text', '')
-        if turn.get("role") != "user" and is_api_error(text):
+_BLOCKED = "⚠️ 답변을 생성하지 못했습니다(안전 필터에 의해 차단됐을 수 있어요). 표현을 조금 바꿔 다시 시도해주세요."
+
+
+def _call_gemini_api(prompt, temperature=0.55, files=None):
+    """글 프롬프트 하나를 보내고 답 글을 돌려준다. 실패하면 '⚠️'로 시작하는 안내 문구(is_api_error로 확인).
+    files: 함께 보낼 파일 [(mime_type, base64 문자열)] - 사진·PDF를 읽힐 때 쓴다."""
+    parts = [{"text": prompt}] + [{"inline_data": {"mime_type": mime, "data": data}} for mime, data in (files or [])]
+    status, data = _post_generate({"contents": [{"parts": parts}], "generationConfig": {"temperature": temperature}})
+    if status == "error":
+        return data
+    try:
+        return data['candidates'][0]['content']['parts'][0]['text']
+    except (KeyError, IndexError):
+        return _BLOCKED
+
+
+def call_agent(system_text, contents, tool_declarations=None, temperature=0.3, force_tool=False):
+    """🌟 [도구를 쓰는 대화] 시스템 지침 + 대화 내역(contents)을 보내고 모델의 한 차례 응답을 돌려준다.
+    반환: (모델 content {'role': 'model', 'parts': [...]}, None) 또는 (None, '⚠️ ...안내 문구').
+    parts에는 글({'text'})과 도구 호출({'functionCall': {'name', 'args'}})이 섞여 있을 수 있다. 호출부가 이 content를 그대로 대화에
+    이어 붙이고 도구 결과({'functionResponse'})를 user content로 넣어 다시 부른다.
+    force_tool: 이번에는 글로만 답하지 못하고 반드시 도구를 부르게 한다(모델이 도구를 부르지 않고 "했다"고만 말할 때의 재시도용)."""
+    payload = {"systemInstruction": {"parts": [{"text": system_text}]}, "contents": contents,
+               "generationConfig": {"temperature": temperature}}
+    if tool_declarations:
+        payload["tools"] = [{"functionDeclarations": tool_declarations}]
+        if force_tool:
+            payload["toolConfig"] = {"functionCallingConfig": {"mode": "ANY"}}
+    for _ in range(2):   # 가끔 빈 응답이 오므로 한 번은 다시 시도한다
+        status, data = _post_generate(payload)
+        if status == "error":
+            return None, data
+        try:
+            parts = data['candidates'][0]['content']['parts']
+        except (KeyError, IndexError):
             continue
-        speaker = "실무자" if turn.get("role") == "user" else "AI"
-        lines.append(f"{speaker}: {text}")
-    return "\n".join(lines)
+        if parts:
+            return {"role": "model", "parts": parts}, None
+    return None, _BLOCKED
 
-
-# =====================================================================
-# 🚀 기능별 서비스 함수 (코어 엔진 호출)
-# =====================================================================
-def generate_target_chat_reply(chat_history, profile_context_str, current_conditions_str, term_context_str=""):
-    chat_history_str = _format_chat_history(chat_history)
-    prompt = get_target_chat_prompt(chat_history_str, profile_context_str, current_conditions_str, term_context_str)
-    return _call_gemini_api(prompt, temperature=0.6)
 
 def generate_target_reasoning(conditions_str, target_stats_str):
     prompt = get_target_reasoning_prompt(conditions_str, target_stats_str)
@@ -213,14 +226,6 @@ def generate_ai_push_copy(target_profile_str, reasoning_str, extra_request_str="
         prompt = get_push_prompt(target_profile_str, reasoning_str, extra_request_str)
     return _call_gemini_api(prompt, temperature=0.7)
 
-def generate_segment_insight_reply(question_str, conditions_str, insight_stats_str):
-    prompt = get_segment_insight_prompt(question_str, conditions_str, insight_stats_str)
-    return _call_gemini_api(prompt, temperature=0.4)
-
-def generate_pivot_insight_reply(question_str, spec_str, result_str):
-    prompt = get_pivot_insight_prompt(question_str, spec_str, result_str)
-    return _call_gemini_api(prompt, temperature=0.4)
-
 def generate_code_analyst_step(prompt):
     """📊 분석 탭 코드 실행형: 한 단계(코드 또는 최종 답변). 프롬프트는 services/code_analyst.py가 조립한다."""
     return _call_gemini_api(prompt, temperature=0.2)
@@ -232,16 +237,3 @@ def read_file_text(data, mime_type):
               "표는 한 행을 한 줄에 '값 | 값 | 값' 형태로 옮기고, 목록과 들여쓰기 구조는 유지해. "
               "글자가 거의 없는 사진이면 보이는 것을 사실만 짧게 설명해. 인사말이나 설명 없이 옮긴 내용만 출력해.")
     return _call_gemini_api(prompt, temperature=0.1, files=[(mime_type, base64.b64encode(data).decode("ascii"))])
-
-def assess_request(prompt):
-    """🌟 요청 판단(services/intent_gate.py): 질문의 뜻·의도를 판단한 JSON 글. 결정적으로 답하도록 온도 0. 실패하면 ⚠️ 문구."""
-    return _call_gemini_api(prompt, temperature=0.0)
-
-def generate_report_free(chat_history, so_reports_str="", draft_str=""):
-    prompt = get_report_free_prompt(_format_chat_history(chat_history), so_reports_str, draft_str)
-    return _call_gemini_api(prompt, temperature=0.4)
-
-def generate_report_reply(chat_history, profile_context_str, so_reports_str="", draft_str=""):
-    chat_history_str = _format_chat_history(chat_history)
-    prompt = get_report_prompt(chat_history_str, profile_context_str, so_reports_str, draft_str)
-    return _call_gemini_api(prompt, temperature=0.2)  # 원문을 빠짐없이 옮기는 정리가 기본이라 낮게

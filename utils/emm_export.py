@@ -121,10 +121,12 @@ def strip_tree_lines(report_text):
     """답변에서 트리 줄(📌·▸·· 등으로 시작하는 줄)을 뺀 나머지 글(핵심 요약, 구성 메모, 설명 문장 등). 트리는 그림으로 따로 보여 주기 위해 쓴다."""
     if not _has_center(report_text):
         return report_text.strip()
-    keep = []
+    keep, after_tree = [], False
     for raw in report_text.splitlines():
         s = raw.strip().lstrip("﻿")
-        if s and (s.startswith("📌") or s[0] in _ITEM_MARKERS):
+        if s.startswith("💡") or s.startswith("📊"):   # 트리 뒤의 피드백·인사이트 문단은 "- " 목록이어도 글이다 - 트리 줄로 오인해 지우지 않는다
+            after_tree = True
+        if not after_tree and s and (s.startswith("📌") or s[0] in _ITEM_MARKERS):
             continue
         keep.append(raw)
     text = "\n".join(keep).strip()
@@ -245,11 +247,6 @@ def _patch_docprops(app_xml, core_xml, title, topic_count):
     return app_xml, core_xml
 
 
-def build_emm_bytes(report_text, title):
-    """보고서 답변 텍스트를 가지형 알마인드(.emm) 파일 바이트로 변환한다."""
-    return build_emm_from_nodes(parse_report_tree(report_text), title)
-
-
 def build_emm_from_nodes(tree_nodes, title):
     """[(depth, text), ...] 트리를 가지형 알마인드(.emm) 파일 바이트로 변환한다.
     📌(depth 0)가 하나뿐이면 그 문구가 중심토픽, 여러 개면 title이 중심토픽이 되고 각 📌가 1단계 가지가 된다."""
@@ -283,7 +280,7 @@ if __name__ == "__main__":
     import xml.etree.ElementTree as ET
 
     sample = "📌 중심\n  ▸ 가\n    · 가-1\n    · 가-2\n  ▸ 나 & <다>\n\n💡 피드백\n무시"
-    with zipfile.ZipFile(io.BytesIO(build_emm_bytes(sample, "테스트"))) as zf:
+    with zipfile.ZipFile(io.BytesIO(build_emm_from_nodes(parse_report_tree(sample), "테스트"))) as zf:
         assert len(zf.namelist()) == len(set(zf.namelist())), "중복 항목 금지"
         for name in zf.namelist():
             if name.endswith(".xml"):
@@ -321,6 +318,8 @@ if __name__ == "__main__":
     # 트리 줄을 뺀 나머지 글(핵심 요약·구성 메모)만 남긴다
     assert strip_tree_lines("📌 중심\n  ▸ 가\n    · 나\n\n핵심 요약: 성과가 좋았어요.\n\n구성 메모: 묶었어요.") == "핵심 요약: 성과가 좋았어요.\n\n구성 메모: 묶었어요."
     assert strip_tree_lines("📌 중심\n  ▸ 가") == ""
+    # 트리 뒤 "💡 피드백" 아래의 "- " 목록은 지워지지 않는다(지우면 피드백이 말풍선에서 사라진다)
+    assert strip_tree_lines("📌 중심\n  ▸ 가\n\n💡 피드백\n- 성과가 좋아요\n- 다음 주 계획을 챙기세요") == "💡 피드백\n- 성과가 좋아요\n- 다음 주 계획을 챙기세요"
     # 📌 중심이 없는 "- 항목" 글 목록은 트리가 아니다(자유 답변의 글머리 목록이 트리로 오인되지 않게)
     bullets = "이번 주 특징이에요.\n- 대전 : 조회수 증가\n- 광주 : 신규 가입\n- 충청 : 보고 없음"
     assert parse_report_tree(bullets) == [] and strip_tree_lines(bullets) == bullets

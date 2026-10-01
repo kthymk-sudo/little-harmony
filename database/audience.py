@@ -653,39 +653,6 @@ def summarize_segment_insight(profile_df, conditions, db_audience=None, top_n=3)
     }
 
 
-def format_segment_insight_reply(insight):
-    if insight is None:
-        return "죄송해요, 그 조건에 맞는 데이터를 찾지 못했어요. 조건을 조금 다르게 다시 말씀해주시겠어요?"
-
-    n = insight.get('대상자수', 0)
-    total = insight.get('전체시청자수', 0)
-    if n == 0:
-        return "말씀하신 조건에 정확히 맞는 시청자는 없었어요. 나이대나 성별 등을 조금 다르게 말씀해주시겠어요?"
-
-    share = f"{n / total * 100:.1f}%" if total else "-"
-    lines = [f"이 조건에 해당하는 시청자는 {n:,}명이에요(전체 시청자의 {share})."]
-
-    def _join(top_list, label):
-        if not top_list:
-            return None
-        return f"{label}는 {', '.join(top_list)} 순으로 많이 봤어요"
-
-    detail_parts = [
-        p for p in (
-            _join(insight.get('선호장르_상위'), "선호 장르"),
-            _join(insight.get('선호채널_상위'), "선호 채널"),
-            _join(insight.get('선호메뉴_상위'), "선호 메뉴"),
-        ) if p
-    ]
-    if detail_parts:
-        lines.append(". ".join(detail_parts) + ".")
-    else:
-        lines.append("다만 선호 장르/채널/메뉴 데이터가 충분하지 않아 구체적인 순위는 확인하기 어려웠어요.")
-
-    lines.append("이 조건으로 타겟을 잡아볼까요?")
-    return " ".join(lines)
-
-
 def summarize_content_ranking(db_audience, profile_df=None, conditions=None, target='콘텐츠', order='인기', top_n=10):
     """
     🌟 [시청기록 자유 분석 - 콘텐츠/채널 순위] "요즘 가장 인기있는 콘텐츠 TOP10은?",
@@ -726,32 +693,6 @@ def summarize_content_ranking(db_audience, profile_df=None, conditions=None, tar
         '기준인원수': matched_total,  # 조건으로 좁힌 경우 그 조건에 해당하는 고객 수 (참고용, 조건 없으면 None)
         '항목': [{'이름': str(row[col_name]), '시청자수': int(row['시청자수'])} for _, row in top.iterrows()],
     }
-
-
-def format_content_ranking_reply(ranking):
-    """summarize_content_ranking()의 계산 결과를 AI 호출 없이도 안전하게 문장으로
-    바꾸는 확정적 폴백 - AI 호출이 실패했을 때 에러 문구 대신 이걸 대화에 남긴다."""
-    if ranking is None:
-        return "죄송해요, 그 조건에 맞는 시청 데이터를 찾지 못했어요. 조건을 조금 다르게 다시 말씀해주시겠어요?"
-    items = ranking.get('항목') or []
-    if not items:
-        return "말씀하신 조건에 맞는 시청 기록을 찾지 못했어요. 조건을 조금 다르게 말씀해주시겠어요?"
-    label = ranking.get('대상') or '콘텐츠'
-    order_label = "비인기" if ranking.get('기준') == '비인기' else "인기"
-    joined = ', '.join(f"{it['이름']}({it['시청자수']}명)" for it in items)
-    return f"{order_label} {label} 순위는 {joined} 순이에요."
-
-
-# 🌟 [시청기록 자유 분석 - 그룹 현황/비교] "SO별로 시청자 수 비교해줘", "나이대별
-# 분포가 어때?"는 사실 같은 계산이다 - 어떤 기준으로 사람을 나눠서 그룹별 인원/비중을
-# 보는 것. 그룹핑 가능한 필드를 여기서 명시적으로 정해두고(임의 컬럼명을 그대로
-# 받으면 존재하지 않는 컬럼 요청 등으로 깨지기 쉬움), '나이대'처럼 실제 컬럼이 아닌
-# 계산이 필요한 필드는 별도 처리한다.
-_GROUPABLE_FIELD_COLUMNS = {
-    '성별': '성별', 'SO세부': '시청자SO', '활동세그먼트': '활동세그먼트',
-    '선호장르': '선호장르', '선호채널': '선호채널', '선호메뉴': '선호메뉴',
-    '선호시청시간대': '선호시청시간대',
-}
 
 
 def _groupable_series(df, group_field):
@@ -812,20 +753,6 @@ def summarize_group_breakdown(profile_df, group_field, conditions=None, db_audie
         for name, cnt in counts.head(top_n).items()
     ]
     return {'기준필드': group_field, '전체인원수': total, '그룹': groups}
-
-
-def format_group_breakdown_reply(breakdown):
-    """summarize_group_breakdown()의 계산 결과를 AI 호출 없이도 안전하게 문장으로
-    바꾸는 확정적 폴백."""
-    if breakdown is None:
-        return "죄송해요, 그 기준으로는 데이터를 나눠보기 어려웠어요. 다른 기준으로 다시 말씀해주시겠어요?"
-    groups = breakdown.get('그룹') or []
-    if not groups:
-        return "말씀하신 조건/기준에 맞는 데이터를 찾지 못했어요. 조건을 조금 다르게 말씀해주시겠어요?"
-    parts = ', '.join(f"{g['그룹값']} {g['인원수']}명({g['비중']}%)" for g in groups)
-    total = breakdown.get('전체인원수', 0)
-    field_label = breakdown.get('기준필드', '')
-    return f"전체 {total:,}명 기준으로 {field_label}별로는 {parts} 순이에요."
 
 
 def _engagement_score(df):

@@ -3,13 +3,14 @@
 # 📝 보고서 탭 화면. 📊 분석 탭과 같은 단순 챗 패턴(phase 없음)이다.
 # 🌟 [활동 보고서 정리] SO별 활동 보고서를 하나씩 붙여넣으면 트리로 정리해 쌓고, 쌓인 보고서로 취합 방향을 대화로
 # 의논해 취합안(키워드 위주 등)을 만든다. 알마인드 파일은 화면 아래 패널에서 최종본 하나만 내려받는다.
-# 시청 데이터 집계를 요청했을 때만 차트/표가 추가로 붙는다.
+# (예전에 저장된 대화의 차트가 있으면 그대로 보여준다.)
 # ============================================================
 import re
 
 import streamlit as st
+from services.report_agent import process_report_turn
 from services.report_service import (
-    process_report_turn, read_attachments, collect_so_reports, collect_materials, merged_title, latest_draft,
+    read_attachments, collect_so_reports, collect_materials, merged_title, latest_draft,
     draft_is_stale,
 )
 from utils.file_reader import FILE_TYPES

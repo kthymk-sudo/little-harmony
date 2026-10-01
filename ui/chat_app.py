@@ -5,13 +5,13 @@
 # 한 곳의 실수가 전체 화면에 영향을 줄 위험이 커진다고 판단해 아래로 분리했다.
 #   - ui/chat_styles.py           : CSS 주입, 말풍선/타이핑 애니메이션 렌더링
 #   - ui/target_card.py           : 타겟 확정 안내문/버튼, 확정 결과 카드, 자동저장
-#   - services/target_service.py  : 타겟 설정 대화 한 턴 처리 (순수 로직)
+#   - services/target_agent.py    : 타겟 설정 대화 한 턴 처리 (AI가 도구를 골라 쓰는 순수 로직)
 #   - services/copy_service.py    : 카피 작성 대화 한 턴 처리 (순수 로직)
 # 이 파일에는 이제 화면 전체를 조립하는 render_chat_app()만 남는다.
 # ============================================================
 import streamlit as st
 from database.db_manager import format_target_summary, save_conversation, make_conversation_title
-from services.target_service import process_target_turn
+from services.target_agent import process_target_turn
 from services.copy_service import process_copy_turn
 from ui import job_runner
 from ui.chat_styles import inject_chat_css, render_message

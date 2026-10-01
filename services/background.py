@@ -26,10 +26,9 @@ class Job:
         return self.future.done()
 
 
-def submit(key, work, persist=None, label="", wrap=None):
+def submit(key, work, persist=None, label=""):
     """key(대화 id)의 작업을 시작한다. work(job) -> 결과. 성공하면 같은 스레드에서 persist(결과)를 불러 DB에 저장한다
-    (사용자가 다른 화면에 있어도 저장되도록). 이미 진행 중인 작업이 있으면 새로 시작하지 않고 그것을 돌려준다.
-    wrap: 실행 함수를 감싸는 함수(Streamlit 스크립트 컨텍스트를 붙이는 등)."""
+    (사용자가 다른 화면에 있어도 저장되도록). 이미 진행 중인 작업이 있으면 새로 시작하지 않고 그것을 돌려준다."""
     job = Job(label)
 
     def run():
@@ -51,7 +50,7 @@ def submit(key, work, persist=None, label="", wrap=None):
         current = _jobs.get(key)
         if current is not None and not current.done():
             return current
-        job.future = _pool.submit(wrap(run) if wrap else run)
+        job.future = _pool.submit(run)
         _jobs[key] = job
     return job
 
